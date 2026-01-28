@@ -1,133 +1,90 @@
 import torch
 import torchaudio
-import glob
 import os
-import numpy as np
-from transformers import (
-    Wav2Vec2FeatureExtractor,
-    Wav2Vec2Model,
-    HubertModel,
-    WavLMModel
-)
+import glob
+from tqdm import tqdm
+from torch.utils.data import DataLoader, Dataset
+from transformers import Wav2Vec2FeatureExtractor, WavLMModel, HubertModel, Wav2Vec2Model
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# Load processor for all model input
-processor = Wav2Vec2FeatureExtractor.from_pretrained("microsoft/wavlm-base") # Do các model WavLM, HUBERT không hỗ trợ input raw audio, nên cần lấy cấu trúc dữ liệu nhận raw audio từ wav2vec2processor, không ảnh hưởng khi embedding = model khác
+class SpeakerDataset(Dataset):
+    def __init__(self, folder_path):
+        self.file_paths = glob.glob(os.path.join(folder_path, "**", "*.wav"), recursive=True)
+        
+    def __len__(self):
+        return len(self.file_paths)
 
-wavlm = WavLMModel.from_pretrained(
-    "microsoft/wavlm-base"
-).to(device).eval()
+    def __getitem__(self, idx):
+        path = self.file_paths[idx]
+        waveform, sr = torchaudio.load(path)
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(sr, 16000)
+            waveform = resampler(waveform)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0)
+        else:
+            waveform = waveform.squeeze(0)
+        filename = os.path.basename(path)
+        speaker_id = filename.split('_')[0]
+        return waveform, speaker_id, filename
 
-hubert = HubertModel.from_pretrained(
-    "facebook/hubert-base-ls960"
-).to(device).eval()
-
-wav2vec2 = Wav2Vec2Model.from_pretrained(
-    "facebook/wav2vec2-base-960h"
-).to(device).eval()
-
-def load_clean_audio(path):
-    waveform, sr = torchaudio.load(path)
-
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-
-    assert sr == 16000
-    assert waveform.dtype == torch.float32
-
-    return waveform
-
-@torch.no_grad() # Không tính gradient để tiết kiệm bộ nhớ
-def wavlm_embedding(waveform):
-    inputs = processor(
-        waveform.squeeze(0),
-        sampling_rate=16000,
-        return_tensors="pt"
-    ).to(device)
-
-    outputs = wavlm(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).squeeze(0).cpu()
+def collate_fn(batch):
+    waveforms, ids, names = zip(*batch)
+    return list(waveforms), list(ids), list(names)
 
 @torch.no_grad()
-def hubert_embedding(waveform):
-    inputs = processor(
-        waveform.squeeze(0),
-        sampling_rate=16000,
-        return_tensors="pt"
-    ).to(device)
-
-    outputs = hubert(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).squeeze(0).cpu()
-
-@torch.no_grad()
-def wav2vec2_embedding(waveform):
-    inputs = processor(
-        waveform.squeeze(0),
-        sampling_rate=16000,
-        return_tensors="pt"
-    ).to(device)
-
-    outputs = wav2vec2(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).squeeze(0).cpu()
-
-def process_speaker_folder(folder_path, embedding_func, save_path=None):
+def run_extraction(model_key, folder_path, save_path, batch_size=8):
     """
-    Process all audio files in a folder and return embeddings in PyTorch format.
-    Recursively searches for audio files at any depth.
-    Extracts speaker ID from filename (e.g., id00000 from id00000_00017.wav)
-    
-    Returns:
-        dict: Contains 'embeddings' (stacked tensor) and 'speaker_ids' (list of speaker IDs)
+    Hàm chính để gọi từ Notebook.
+    model_key: "wavlm", "hubert", hoặc "wav2vec2"
     """
-
-    # Normalize path
-    folder_path = os.path.abspath(folder_path)
-
-    # Recursively find all wav files
-    audio_files = glob.glob(
-        os.path.join(folder_path, "**", "*.wav"),
-        recursive=True
-    )
-
-    if len(audio_files) == 0:
-        print(f"No wav files found in {folder_path}")
-        return None
-
-    embeddings_list = []
-    ids_list = []
-
-    for audio_file in audio_files:
-        try:
-            waveform = load_clean_audio(audio_file)
-            embedding = embedding_func(waveform)
-
-            # Extract speaker ID from filename (id00000_00017.wav -> id00000)
-            filename = os.path.basename(audio_file)
-            id_speaker = filename.split('_')[0]
-
-            embeddings_list.append(embedding)
-            ids_list.append(id_speaker)
-
-            print(f"Processed: {audio_file} (Speaker: {id_speaker})")
-
-        except Exception as e:
-            print(f"Error processing {audio_file}: {e}")
-            continue
-
-    print(f"\nTotal files processed for {id_speaker}: {len(embeddings_list)}")
-
-    # Stack embeddings into a tensor
-    embeddings_tensor = torch.stack(embeddings_list)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Create output dictionary
-    output_data = {
-        'embeddings': embeddings_tensor,
-        'speaker_ids': ids_list
+    # Map model key với các class và repo tương ứng
+    model_map = {
+        "wavlm": (WavLMModel, "microsoft/wavlm-base"),
+        "hubert": (HubertModel, "facebook/hubert-base-ls960"),
+        "wav2vec2": (Wav2Vec2Model, "facebook/wav2vec2-base-960h")
     }
     
-    # Save to .pt file if save_path provided
-    if save_path:
-        torch.save(output_data, save_path)
-        print(f"Saved to {save_path}")
+    if model_key not in model_map:
+        raise ValueError(f"Model {model_key} không được hỗ trợ. Chọn: {list(model_map.keys())}")
     
-    return output_data
+    model_class, repo = model_map[model_key]
+    processor = Wav2Vec2FeatureExtractor.from_pretrained(repo)
+    model = model_class.from_pretrained(repo, output_hidden_states=True).to(device).eval()
+    
+    dataset = SpeakerDataset(folder_path)
+    dataloader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+    
+    all_embeddings = []
+    all_speaker_ids = []
+    all_filenames = []
+
+    print(f"--- Đang chạy {model_key} trên {device} ---")
+    for waveforms, ids, names in tqdm(dataloader):
+        inputs = processor(waveforms, sampling_rate=16000, return_tensors="pt", padding=True).to(device)
+        outputs = model(**inputs, output_hidden_states=True)
+        
+        # Stack & Mean pooling: (Batch, Layers, Dim)
+        # 13 layers cho bản base
+        stacked = torch.stack(outputs.hidden_states) # (13, B, T, D)
+        pooled = stacked.mean(dim=2).permute(1, 0, 2).cpu() # (B, 13, D)
+
+        all_embeddings.append(pooled)
+        all_speaker_ids.extend(ids)
+        all_filenames.extend(names)
+
+    final_data = {
+        'embeddings': torch.cat(all_embeddings, dim=0),
+        'speaker_ids': all_speaker_ids,
+        'filenames': all_filenames,
+        'model_name': model_key
+    }
+
+    torch.save(final_data, save_path)
+    print(f"Lưu thành công: {save_path}")
+    
+    # Dọn dẹp GPU
+    del model
+    torch.cuda.empty_cache()
+    return save_path
