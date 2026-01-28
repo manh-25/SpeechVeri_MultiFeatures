@@ -54,7 +54,7 @@ def run_extraction(model_key, folder_path, save_path, batch_size=8):
     
     model_class, repo = model_map[model_key]
     processor = Wav2Vec2FeatureExtractor.from_pretrained(repo)
-    model = model_class.from_pretrained(repo, output_hidden_states=True,torch_dtype=torch.float16,attn_implementation="sdpa").to(device).eval()
+    model = model_class.from_pretrained(repo, output_hidden_states=True,torch_dtype=torch.float16,attn_implementation="eager").to(device).eval()
     
     dataset = SpeakerDataset(folder_path)
     dataloader = DataLoader(
