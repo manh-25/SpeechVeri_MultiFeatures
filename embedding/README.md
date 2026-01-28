@@ -15,7 +15,7 @@ Module embedding cung cấp tính năng để:
 embedding/
 ├── README.md                 # Tài liệu này
 ├── embedding.py              # Mô-đun Python chính
-└── embed_folder.ipynb        # Notebook ví dụ
+└── main.ipynb        # Notebook ví dụ
 ```
 
 ## 🔧 Thành phần chính
@@ -58,7 +58,7 @@ Lưu file `.pt` chứa dictionary với các khóa:
 
 ### Cách 1: Sử dụng Notebook (Khuyến nghị)
 
-Mở `embed_folder.ipynb` và chạy các cell:
+Mở `main.ipynb` và chạy các cell:
 
 ```python
 from embedding import run_extraction
