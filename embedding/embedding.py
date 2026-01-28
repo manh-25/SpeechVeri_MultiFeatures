@@ -6,7 +6,6 @@ import glob
 from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
 from transformers import Wav2Vec2FeatureExtractor, WavLMModel, HubertModel, Wav2Vec2Model
-from optimum.bettertransformer import BetterTransformer
 
 class SpeakerDataset(Dataset):
     def __init__(self, folder_path):
@@ -55,16 +54,7 @@ def run_extraction(model_key, folder_path, save_path, batch_size=8):
     
     model_class, repo = model_map[model_key]
     processor = Wav2Vec2FeatureExtractor.from_pretrained(repo)
-    model = model_class.from_pretrained(repo, output_hidden_states=True).to(device).eval()
-
-    try:
-        model = BetterTransformer.transform(model)
-        print("Đã kích hoạt BetterTransformer.")
-    except Exception as e:
-        print(f"Không thể kích hoạt BetterTransformer: {e}. Chạy chế độ thường.")
-
-    # Chuyển sang Half Precision (FP16) để tăng tốc 2x và giảm VRAM 2x
-    model = model.half().eval()
+    model = model_class.from_pretrained(repo, output_hidden_states=True,torch_dtype=torch.float16,attn_implementation="sdpa").to(device).eval()
     
     dataset = SpeakerDataset(folder_path)
     dataloader = DataLoader(
