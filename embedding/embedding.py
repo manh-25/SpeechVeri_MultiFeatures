@@ -35,11 +35,12 @@ def collate_fn(batch):
     return list(waveforms), list(ids), list(names)
 
 @torch.inference_mode()
-def run_extraction(model_key, folder_path, save_path, batch_size=8):
+def run_extraction(model_key, folder_path, save_dir, batch_size=8, shard_size=10000):
     """
     Hàm chính để gọi từ Notebook.
     model_key: "wavlm", "hubert", hoặc "wav2vec2"
     """
+    os.makedirs(save_dir, exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Map model key với các class và repo tương ứng
@@ -66,9 +67,10 @@ def run_extraction(model_key, folder_path, save_path, batch_size=8):
         pin_memory=True     # Luôn bật cái này khi dùng CUDA
     )
     
-    all_embeddings = []
-    all_speaker_ids = []
-    all_filenames = []
+    current_embeddings = []
+    current_ids = []
+    current_names = []
+    shard_count = 0
 
     print(f"--- Đang chạy {model_key} trên {device} ---")
     # Cơ chế "Streaming" cho .pt (Lưu nháp nếu cần, ở đây tối ưu hóa RAM list)
@@ -92,26 +94,33 @@ def run_extraction(model_key, folder_path, save_path, batch_size=8):
         # Chuyển về CPU và xóa tensor trung gian ngay lập tức để giải phóng RAM
         pooled = stacked.mean(dim=2).permute(1, 0, 2).cpu().float() 
         
-        all_embeddings.append(pooled)
-        all_speaker_ids.extend(ids)
-        all_filenames.extend(names)
+        current_embeddings.append(pooled)
+        current_ids.extend(ids)
+        current_names.extend(names)
 
-        # Giải phóng VRAM định kỳ
-        if i % 100 == 0:
+        # Kiểm tra nếu đủ kích thước shard hoặc là batch cuối cùng
+        if len(current_names) >= shard_size or (i == len(dataloader) - 1):
+            shard_data = {
+                'embeddings': torch.cat(current_embeddings, dim=0),
+                'speaker_ids': current_ids,
+                'filenames': current_names,
+                'model_name': model_key
+            }
+            
+            shard_path = os.path.join(save_dir, f"{model_key}_shard_{shard_count}.pt")
+            torch.save(shard_data, shard_path)
+            
+            # GIẢI PHÓNG RAM NGAY LẬP TỨC
+            del shard_data
+            current_embeddings, current_ids, current_names = [], [], []
+            shard_count += 1
+            gc.collect()
             torch.cuda.empty_cache()
 
-    # Giải phóng model trước khi thực hiện cat() cuối cùng để tránh đỉnh điểm RAM
+    # Dọn dẹp model
     del model
     gc.collect()
     torch.cuda.empty_cache()
-
-    final_data = {
-        'embeddings': torch.cat(all_embeddings, dim=0),
-        'speaker_ids': all_speaker_ids,
-        'filenames': all_filenames,
-        'model_name': model_key
-    }
-
-    torch.save(final_data, save_path)
-    print(f"Lưu thành công: {save_path}")
-    return save_path
+    
+    print(f"Hoàn thành! Đã lưu {shard_count} mảnh vào thư mục: {save_dir}")
+    return save_dir
