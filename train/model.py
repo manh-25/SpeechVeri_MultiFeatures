@@ -61,65 +61,29 @@ class ModalityProjector(nn.Module):
     Supports multiple feature modes.
     """
 
-    def __init__(self, input_dim, output_dim=PTM_DIM, feature_mode="mfbe_pitch"):
+    def __init__(self, input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM):
         super().__init__()
-        self.feature_mode = feature_mode
-
-        # Determine input dimension based on feature mode
-        # Assuming: MFBE=80, MFCC=40, Pitch=1
-        if feature_mode == "mfbe_pitch":
-            in_dim = 80 + 1  # 81
-        elif feature_mode == "mfcc_pitch":
-            in_dim = 40 + 1  # 41
-        elif feature_mode == "mfbe_only":
-            in_dim = 80
-        elif feature_mode == "mfcc_only":
-            in_dim = 40
-        elif feature_mode == "pitch_only":
-            in_dim = 1
-        else:
-            in_dim = input_dim
-
         self.net = nn.Sequential(
-            nn.Linear(in_dim, 256),
+            nn.Conv1d(input_dim, 256, kernel_size=1),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 512),
+            nn.Conv1d(256, 512, kernel_size=1),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(512, output_dim),
+            nn.Conv1d(512, output_dim, kernel_size=1),
         )
 
     def forward(self, x):
-        """
-        Args:
-            x: (batch_size, input_dim)
-        Returns:
-            (batch_size, output_dim)
-        """
+        # x lúc này là (B, C, T)
         return self.net(x)
 
 
 class HandcraftedEncoder(nn.Module):
-    """
-    Encodes handcrafted features (MFBE/MFCC + Pitch) using projector.
-    Input: (batch_size, channels)
-    Output: (batch_size, dim)
-    """
-
     def __init__(self, input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode="mfbe_pitch"):
         super().__init__()
         self.projector = ModalityProjector(input_dim, output_dim, feature_mode)
 
     def forward(self, x):
-        """
-        Args:
-            x: (batch_size, input_dim)
-        Returns:
-            (batch_size, output_dim)
-        """
         return self.projector(x)
 
 
@@ -132,21 +96,14 @@ class GatingMechanism(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.gate = nn.Sequential(
-            nn.Linear(dim * 2, dim),
+            nn.Conv1d(dim * 2, dim, kernel_size=1),
             nn.Sigmoid(),
         )
 
     def forward(self, ptm_feat, hc_feat):
-        """
-        Args:
-            ptm_feat: (batch_size, dim)
-            hc_feat: (batch_size, dim)
-        Returns:
-            fused: (batch_size, dim)
-            gate_weights: (batch_size, dim) - for analysis
-        """
-        combined = torch.cat([ptm_feat, hc_feat], dim=-1)
-        gate_weights = self.gate(combined)
+        # ptm_feat, hc_feat: (B, D, T)
+        combined = torch.cat([ptm_feat, hc_feat], dim=1)
+        gate_weights = self.gate(combined) # (B, D, T)
         fused = gate_weights * ptm_feat + (1 - gate_weights) * hc_feat
         return fused, gate_weights
 
@@ -156,19 +113,11 @@ class ConcatenationFusion(nn.Module):
 
     def __init__(self, dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM):
         super().__init__()
-        self.projection = nn.Linear(dim1 + dim2, output_dim)
+        self.projection = nn.Conv1d(dim1 + dim2, output_dim, kernel_size=1)
 
     def forward(self, feat1, feat2):
-        """
-        Args:
-            feat1: (batch_size, dim1)
-            feat2: (batch_size, dim2)
-        Returns:
-            (batch_size, output_dim)
-        """
         combined = torch.cat([feat1, feat2], dim=1)
-        output = self.projection(combined)
-        return output
+        return self.projection(combined)
 
 
 class CrossAttentionFusion(nn.Module):
@@ -176,58 +125,38 @@ class CrossAttentionFusion(nn.Module):
 
     def __init__(self, dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM, num_heads=8):
         super().__init__()
-        self.dim1 = dim1
-        self.dim2 = dim2
-        self.num_heads = num_heads
-        self.head_dim = output_dim // num_heads
-
         # Ensure output_dim is divisible by num_heads
         assert output_dim % num_heads == 0, "output_dim must be divisible by num_heads"
 
+        self.num_heads = num_heads
+        self.mha = nn.MultiheadAttention(embed_dim=output_dim, num_heads=num_heads, batch_first=True)
+
         # Query, Key, Value projections
-        self.q_proj = nn.Linear(dim1, output_dim)
-        self.k_proj = nn.Linear(dim2, output_dim)
-        self.v_proj = nn.Linear(dim2, output_dim)
+        self.q_proj = nn.Conv1d(dim1, output_dim, kernel_size=1)
+        self.k_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
+        self.v_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
 
         # Output projection
-        self.out_proj = nn.Linear(output_dim, output_dim)
-        self.scale = math.sqrt(self.head_dim)
+        self.out_proj = nn.Conv1d(output_dim, output_dim, kernel_size=1)
 
     def forward(self, feat1, feat2):
         """
         Args:
-            feat1: (batch_size, dim1) - PTM features
-            feat2: (batch_size, dim2) - Handcrafted features
+            feat1: (B, D1, T) - Thường là PTM features
+            feat2: (B, D2, T) - Thường là Handcrafted features
         Returns:
-            (batch_size, output_dim)
+            (B, output_dim, T)
         """
-        batch_size = feat1.size(0)
+        # .transpose(1, 2) biến (B, D, T) -> (B, T, D)
+        Q = self.q_proj(feat1).transpose(1, 2) 
+        K = self.k_proj(feat2).transpose(1, 2)
+        V = self.v_proj(feat2).transpose(1, 2)
 
-        # Project to attention space
-        Q = self.q_proj(feat1)  # (batch_size, output_dim)
-        K = self.k_proj(feat2)  # (batch_size, output_dim)
-        V = self.v_proj(feat2)  # (batch_size, output_dim)
+        attn_output, _ = self.mha(query=Q, key=K, value=V)
 
-        # Reshape for multi-head attention
-        Q = Q.view(batch_size, self.num_heads, self.head_dim)  # (B, H, D/H)
-        K = K.view(batch_size, self.num_heads, self.head_dim)
-        V = V.view(batch_size, self.num_heads, self.head_dim)
-
-        # Attention scores: (B, H, 1, D/H) @ (B, H, D/H, 1) -> (B, H, 1, 1)
-        scores = torch.matmul(Q.unsqueeze(2), K.transpose(-2, -1).unsqueeze(1))
-        scores = scores / self.scale
-        attn_weights = F.softmax(scores, dim=-1)  # (B, H, 1, 1)
-
-        # Apply attention: (B, H, 1, D/H) @ (B, H, D/H, 1) -> (B, H, 1, 1)
-        context = torch.matmul(attn_weights, V.unsqueeze(2))  # (B, H, 1, D/H)
-
-        # Concatenate heads: (B, output_dim)
-        context = context.squeeze(2).view(batch_size, -1)
-
-        # Output projection
-        output = self.out_proj(context)
-        return output
-
+        # Chuyển về (B, D, T) để ECAPA-TDNN tiếp nhận
+        output = attn_output.transpose(1, 2)
+        return self.out_proj(output)
 
 # ============================================================================
 # ECAPA-TDNN BACKBONE
@@ -376,9 +305,7 @@ class SpeakerVerificationModel(nn.Module):
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
 
             self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
-
-        # Speaker classification head
-        self.classifier = nn.Linear(EMBEDDING_DIM, num_speakers)
+       
 
     def forward(self, return_gates=False, **kwargs):
         """
@@ -410,35 +337,36 @@ class SpeakerVerificationModel(nn.Module):
             speaker_embedding = self.backbone(ptm_feat)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 2:
-            feature = kwargs["feature"]
+            feature = kwargs["feature"] # (B, C_hc, T)
             # Handcrafted encoder
-            hc_feat = self.handcrafted_encoder(feature)  # (B, PTM_DIM)
+            hc_feat = self.handcrafted_encoder(feature)  # (B, 768, T)
             # Backbone
             speaker_embedding = self.backbone(hc_feat)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 3:
-            embedding = kwargs["embedding"]
-            feature = kwargs["feature"]
+            embedding = kwargs["embedding"] # (B, 13, 768)
+            feature = kwargs["feature"]     # (B, C_hc, T)
             # Individual encoders
             ptm_feat = self.ptm_encoder(embedding)  # (B, PTM_DIM)
-            hc_feat = self.handcrafted_encoder(feature)  # (B, PTM_DIM)
+            # (B, 768) -> (B, 768, 1) -> (B, 768, T)
+            T = feature.size(-1)
+            ptm_feat_expanded = ptm_feat.unsqueeze(-1).expand(-1, -1, T)
+
+            hc_feat = self.handcrafted_encoder(feature)  # (B, 768, T)
             
             # Fusion
             if self.fusion_method == "gating":
-                fused_feat, gate_weights = self.fusion(ptm_feat, hc_feat)
+                fused_feat, gate_weights = self.fusion(ptm_feat_expanded, hc_feat) # (B, 768, T)
             else:
-                fused_feat = self.fusion(ptm_feat, hc_feat)
+                fused_feat = self.fusion(ptm_feat_expanded, hc_feat)
             
             # Backbone
             speaker_embedding = self.backbone(fused_feat)  # (B, EMBEDDING_DIM)
 
-        # Speaker classification
-        logits = self.classifier(speaker_embedding)
-
         if return_gates and gate_weights is not None:
-            return logits, speaker_embedding, gate_weights
+            return None, speaker_embedding, gate_weights
         else:
-            return logits, speaker_embedding
+            return None, speaker_embedding
 
 
 # ============================================================================
@@ -447,25 +375,34 @@ class SpeakerVerificationModel(nn.Module):
 class AAMSoftmaxLoss(nn.Module):
     """Additive Angular Margin Softmax Loss"""
 
-    def __init__(self, num_speakers=None, margin=AAM_MARGIN, scale=AAM_SCALE):
-        super().__init__()
+    def __init__(self, num_speakers, embedding_dim=EMBEDDING_DIM, margin=AAM_MARGIN, scale=AAM_SCALE):
+        super(AAMSoftmaxLoss, self).__init__()
+        self.num_speakers = num_speakers
+        self.embedding_dim = embedding_dim
         self.margin = margin
         self.scale = scale
-        self.num_speakers = num_speakers
+
+        # Trọng số của các speaker (prototypes)
+        self.weight = nn.Parameter(torch.FloatTensor(num_speakers, embedding_dim))
+        nn.init.xavier_uniform_(self.weight)
+
+        # Các hằng số tính toán sẵn để tăng tốc
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.th = math.cos(math.pi - margin)
+        self.mm = math.sin(math.pi - margin) * margin
 
     def forward(self, logits, labels, embeddings=None):
-        """
-        Args:
-            logits: (batch_size, num_speakers)
-            labels: (batch_size,)
-            embeddings: (batch_size, embedding_dim) - for AAM computation
-
-        Returns:
-            loss: scalar
-        """
-        # Standard cross-entropy loss with AAM margin
-        loss = F.cross_entropy(logits, labels)
-        return loss
+        cosine = F.linear(F.normalize(embeddings), F.normalize(self.weight))
+        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(0, 1))
+        phi = cosine * self.cos_m - sine * self.sin_m
+        phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+        one_hot = torch.zeros(cosine.size(), device=embeddings.device)
+        one_hot.scatter_(1, labels.view(-1, 1).long(), 1)
+        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output *= self.scale
+        loss = F.cross_entropy(output, labels)
+        return loss, output
 
 
 # ============================================================================

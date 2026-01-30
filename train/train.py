@@ -48,6 +48,7 @@ from config import (
     AAM_MARGIN,
     AAM_SCALE,
     PTM_DIM,
+    PTM_NUM_LAYERS,
     HANDCRAFTED_DIM,
 )
 from model import SpeakerVerificationModel, AAMSoftmaxLoss, get_model
@@ -162,9 +163,7 @@ class EarlyStopping:
                 self.early_stop = True
 
 
-def train_epoch(
-    model, train_loader, optimizer, criterion, scaler, epoch, device, log_interval=LOG_INTERVAL
-):
+def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device, log_interval=LOG_INTERVAL):
     """
     Train for one epoch.
 
@@ -194,20 +193,18 @@ def train_epoch(
     for batch_idx, batch_data in enumerate(progress_bar):
         # Move data to device
         labels = batch_data["label"].to(device)
-        for key in batch_data:
-            if key != "label":
-                batch_data[key] = batch_data[key].to(device)
+        inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
         optimizer.zero_grad()
 
         # Forward pass with mixed precision
         if MIXED_PRECISION:
             with autocast():
-                logits, embeddings = model(**{k: v for k, v in batch_data.items() if k != "label"})
-                loss = criterion(logits, labels)
+                _, embeddings = model(**inputs)
+                loss, logits = criterion(None, labels, embeddings=embeddings)
         else:
-            logits, embeddings = model(**{k: v for k, v in batch_data.items() if k != "label"})
-            loss = criterion(logits, labels)
+            _, embeddings = model(**inputs)
+            loss, logits = criterion(None, labels, embeddings=embeddings)
 
         # Backward pass
         if MIXED_PRECISION:
@@ -268,13 +265,11 @@ def validate(model, val_loader, criterion, device):
         for batch_data in progress_bar:
             # Move data to device
             labels = batch_data["label"].to(device)
-            for key in batch_data:
-                if key != "label":
-                    batch_data[key] = batch_data[key].to(device)
+            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
             # Forward pass
-            logits, embeddings = model(**{k: v for k, v in batch_data.items() if k != "label"})
-            loss = criterion(logits, labels)
+            _, embeddings = model(**inputs)
+            loss, logits = criterion(None, labels, embeddings=embeddings)
 
             # Metrics
             accuracy = compute_metrics(logits, labels)
@@ -303,7 +298,6 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
     model.eval()
     all_gates = []
     all_labels = []
-    all_preds = []
     
     print("\nAnalyzing gating weights...")
     with torch.no_grad():
@@ -313,17 +307,15 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
                 if key != "label":
                     batch_data[key] = batch_data[key].to(device)
             
-            logits, _, gate_weights = model(return_gates=True, **{k: v for k, v in batch_data.items() if k != "label"})
+            _, speaker_embedding, gate_weights = model(return_gates=True, **{k: v for k, v in batch_data.items() if k != "label"})
             
             # Average gate weights across embedding dimension
             gate_avg = gate_weights.mean(dim=-1).cpu().numpy()
             all_gates.extend(gate_avg)
             all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(torch.sigmoid(logits).cpu().numpy())
     
     all_gates = np.array(all_gates)
     all_labels = np.array(all_labels)
-    all_preds = np.array(all_preds)
     
     # Plot gate distribution
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -346,7 +338,7 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
     print(f"  PTM Priority (g > 0.5): {ptm_priority} / {len(all_gates)} ({100*ptm_priority/len(all_gates):.1f}%)")
     print(f"  HC Priority (g <= 0.5): {hc_priority} / {len(all_gates)} ({100*hc_priority/len(all_gates):.1f}%)")
     
-    return all_gates, all_labels, all_preds
+    return all_gates, all_labels
 
 
 # ============================================================================
@@ -426,7 +418,7 @@ def train(args):
     print("Loading data...")
     train_loader, val_loader, test_loader, speaker_to_idx, num_speakers = (
         create_data_loaders(
-            args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=4
+            args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
         )
     )
     print(f"✓ Loaded {num_speakers} speakers")
@@ -447,14 +439,17 @@ def train(args):
     print("\nGenerating model summary...")
     try:
         # Determine input key and dimension based on mode
-        input_key = "embedding" if args.mode == 1 else "feature"
-        input_dim = PTM_DIM if args.mode == 1 else HANDCRAFTED_DIM
-        model_summary = summary(
-            model,
-            input_size={input_key: (args.batch_size, input_dim)},
-            verbose=0,
-            device=str(device)
-        )
+        if args.mode == 3:
+            input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM), 
+                          "feature": (args.batch_size, HANDCRAFTED_DIM, 200) 
+                          }
+        else:
+            input_key = "embedding" if args.mode == 1 else "feature"
+            dim = PTM_DIM if args.mode == 1 else HANDCRAFTED_DIM # Nếu là Mode 2 (ECAPA), cần chiều T (ví dụ 200). Mode 1 là vector tĩnh
+            input_data = {input_key: (args.batch_size, dim, 200 if args.mode == 2 else None)}
+
+        model_summary = summary(model, input_size=input_data, verbose=0, device=str(device))
+        
         with open(os.path.join(exp_dir, "model_summary.txt"), "w", encoding="utf-8") as f:
             f.write(str(model_summary))
         print(f"✓ Model summary saved to {os.path.join(exp_dir, 'model_summary.txt')}")
@@ -462,15 +457,18 @@ def train(args):
         print(f"⚠ Could not save model summary: {e}")
 
     # Loss and optimizer
-    criterion = AAMSoftmaxLoss(num_speakers=num_speakers)
-    
+    criterion = AAMSoftmaxLoss(num_speakers=num_speakers, embedding_dim=args.embedding_dim)
+    criterion = criterion.to(device)
+
     if args.optimizer.lower() == "adam":
+        params = list(model.parameters()) + list(criterion.parameters())
         opt = optim.Adam(
-            model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
+            params, lr=args.learning_rate, weight_decay=args.weight_decay
         )
     elif args.optimizer.lower() == "sgd":
+        params = list(model.parameters()) + list(criterion.parameters())
         opt = optim.SGD(
-            model.parameters(),
+            params,
             lr=args.learning_rate,
             momentum=MOMENTUM,
             nesterov=NESTEROV,
@@ -578,9 +576,9 @@ def train(args):
 
     # Analyze gating if applicable
     if args.mode == 3 and args.fusion_method == "gating":
-        gates, labels, preds = analyze_gating_behavior(model, test_loader, device, exp_dir)
+        gates, labels = analyze_gating_behavior(model, test_loader, device, exp_dir)
     else:
-        gates, labels, preds = None, None, None
+        gates, labels = None, None
 
     # Save final results
     final_results = {

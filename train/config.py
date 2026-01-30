@@ -18,7 +18,20 @@ MODE = 1
 FUSION_METHOD = "gating"
 
 # Feature mode for handcrafted features: "mfbe_pitch", "mfcc_pitch", "mfbe_only", "mfcc_only", "pitch_only"
-FEATURE_MODE = "mfbe_pitch"
+FEATURE_MODE = "mfbe_pitch" 
+
+# 2. Định nghĩa mapping kích thước
+# Mel-filterbank (MFBE) thường là 80, MFCC là 40, Pitch là 1
+DIM_MAP = {
+    "mfbe_pitch": 80 + 1,  # 81
+    "mfcc_pitch": 40 + 1,  # 41
+    "mfbe_only": 80,
+    "mfcc_only": 40,
+    "pitch_only": 1
+}
+
+# 3. Tự động gán dimension
+HANDCRAFTED_DIM = DIM_MAP.get(FEATURE_MODE, 81)
 
 # Use gating mechanism for fusion (only for MODE 3)
 USE_GATING = True
@@ -26,7 +39,6 @@ USE_GATING = True
 # Feature dimensions
 PTM_DIM = 768  # WavLM/HuBERT/Wav2Vec2 output dimension
 PTM_NUM_LAYERS = 13  # Number of layers to use
-HANDCRAFTED_DIM = 81  # MFBE (80) + Pitch (1)
 
 # ECAPA-TDNN backbone
 ECAPA_CHANNELS = 512
