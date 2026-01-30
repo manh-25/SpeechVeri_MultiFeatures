@@ -1,0 +1,126 @@
+import torch
+import torchaudio
+import os
+import gc
+import glob
+from tqdm import tqdm
+from torch.utils.data import DataLoader, Dataset
+from transformers import Wav2Vec2FeatureExtractor, WavLMModel, HubertModel, Wav2Vec2Model
+
+class SpeakerDataset(Dataset):
+    def __init__(self, folder_path):
+        self.file_paths = glob.glob(os.path.join(folder_path, "**", "*.wav"), recursive=True)
+        # Sắp xếp file theo dung lượng (proxy cho độ dài âm thanh)
+        self.file_paths.sort(key=lambda x: os.path.getsize(x))
+        
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        path = self.file_paths[idx]
+        waveform, sr = torchaudio.load(path)
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(sr, 16000)
+            waveform = resampler(waveform)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0)
+        else:
+            waveform = waveform.squeeze(0)
+        filename = os.path.basename(path)
+        speaker_id = filename.split('_')[0]
+        return waveform, speaker_id, filename
+
+def collate_fn(batch):
+    waveforms, ids, names = zip(*batch)
+    return list(waveforms), list(ids), list(names)
+
+@torch.inference_mode()
+def run_extraction(model_key, folder_path, save_dir, batch_size=8, shard_size=10000):
+    """
+    Hàm chính để gọi từ Notebook.
+    model_key: "wavlm", "hubert", hoặc "wav2vec2"
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Map model key với các class và repo tương ứng
+    model_map = {
+        "wavlm": (WavLMModel, "microsoft/wavlm-base"),
+        "hubert": (HubertModel, "facebook/hubert-base-ls960"),
+        "wav2vec2": (Wav2Vec2Model, "facebook/wav2vec2-base-960h")
+    }
+    
+    if model_key not in model_map:
+        raise ValueError(f"Model {model_key} không được hỗ trợ. Chọn: {list(model_map.keys())}")
+    
+    model_class, repo = model_map[model_key]
+    processor = Wav2Vec2FeatureExtractor.from_pretrained(repo)
+    model = model_class.from_pretrained(repo, output_hidden_states=True,torch_dtype=torch.float16,attn_implementation="eager").to(device).eval()
+    
+    dataset = SpeakerDataset(folder_path)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        collate_fn=collate_fn, 
+        shuffle=False, 
+        num_workers=4,      # Thử với 4 hoặc 8 tùy số nhân CPU
+        pin_memory=True     # Luôn bật cái này khi dùng CUDA
+    )
+    
+    current_embeddings = []
+    current_ids = []
+    current_names = []
+    shard_count = 0
+
+    print(f"--- Đang chạy {model_key} trên {device} ---")
+    # Cơ chế "Streaming" cho .pt (Lưu nháp nếu cần, ở đây tối ưu hóa RAM list)
+    for i, (waveforms, ids, names) in enumerate(tqdm(dataloader)):
+        waveforms_numpy = [w.numpy() for w in waveforms]
+        
+        # Ép kiểu input về half ngay khi vào model
+        inputs = processor(
+            waveforms_numpy, 
+            sampling_rate=16000, 
+            return_tensors="pt", 
+            padding=True
+        ).to(device)
+        inputs['input_values'] = inputs['input_values'].half()
+        
+        outputs = model(**inputs, output_hidden_states=True)
+        
+        # Stack & Mean pooling
+        stacked = torch.stack(outputs.hidden_states) # (13, B, T, D)
+        
+        # Chuyển về CPU và xóa tensor trung gian ngay lập tức để giải phóng RAM
+        pooled = stacked.mean(dim=2).permute(1, 0, 2).cpu().float() 
+        
+        current_embeddings.append(pooled)
+        current_ids.extend(ids)
+        current_names.extend(names)
+
+        # Kiểm tra nếu đủ kích thước shard hoặc là batch cuối cùng
+        if len(current_names) >= shard_size or (i == len(dataloader) - 1):
+            shard_data = {
+                'embeddings': torch.cat(current_embeddings, dim=0),
+                'speaker_ids': current_ids,
+                'filenames': current_names,
+                'model_name': model_key
+            }
+            
+            shard_path = os.path.join(save_dir, f"{model_key}_shard_{shard_count}.pt")
+            torch.save(shard_data, shard_path)
+            
+            # GIẢI PHÓNG RAM NGAY LẬP TỨC
+            del shard_data
+            current_embeddings, current_ids, current_names = [], [], []
+            shard_count += 1
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    # Dọn dẹp model
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    print(f"Hoàn thành! Đã lưu {shard_count} mảnh vào thư mục: {save_dir}")
+    return save_dir
