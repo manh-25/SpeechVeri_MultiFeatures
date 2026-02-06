@@ -1,5 +1,6 @@
 import torch
 import torchaudio
+import soundfile as sf
 import os
 import gc
 import glob
@@ -18,7 +19,11 @@ class SpeakerDataset(Dataset):
 
     def __getitem__(self, idx):
         path = self.file_paths[idx]
-        waveform, sr = torchaudio.load(path)
+        # Dùng soundfile thay vì torchaudio.load để tránh lỗi FFmpeg
+        waveform_np, sr = sf.read(path)
+        waveform = torch.from_numpy(waveform_np).float()
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
         if sr != 16000:
             resampler = torchaudio.transforms.Resample(sr, 16000)
             waveform = resampler(waveform)
