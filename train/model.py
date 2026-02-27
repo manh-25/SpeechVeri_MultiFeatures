@@ -121,42 +121,36 @@ class ConcatenationFusion(nn.Module):
 
 
 class CrossAttentionFusion(nn.Module):
-    """Cross-modal attention fusion"""
-
+    """Cross-modal attention fusion (PTM static query -> Handcrafted temporal)"""
     def __init__(self, dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM, num_heads=8):
         super().__init__()
-        # Ensure output_dim is divisible by num_heads
         assert output_dim % num_heads == 0, "output_dim must be divisible by num_heads"
-
         self.num_heads = num_heads
         self.mha = nn.MultiheadAttention(embed_dim=output_dim, num_heads=num_heads, batch_first=True)
 
-        # Query, Key, Value projections
         self.q_proj = nn.Conv1d(dim1, output_dim, kernel_size=1)
         self.k_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
         self.v_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
-
-        # Output projection
         self.out_proj = nn.Conv1d(output_dim, output_dim, kernel_size=1)
 
-    def forward(self, feat1, feat2):
-        """
-        Args:
-            feat1: (B, D1, T) - Thường là PTM features
-            feat2: (B, D2, T) - Thường là Handcrafted features
-        Returns:
-            (B, output_dim, T)
-        """
-        # .transpose(1, 2) biến (B, D, T) -> (B, T, D)
-        Q = self.q_proj(feat1).transpose(1, 2) 
-        K = self.k_proj(feat2).transpose(1, 2)
-        V = self.v_proj(feat2).transpose(1, 2)
+    def forward(self, ptm_static, hc_temporal):
+        # Đảm bảo PTM có shape (B, D, 1)
+        if ptm_static.dim() == 2:
+            ptm_static = ptm_static.unsqueeze(-1)
+            
+        # Q: (B, 1, D) | K, V: (B, T, D)
+        Q = self.q_proj(ptm_static).transpose(1, 2) 
+        K = self.k_proj(hc_temporal).transpose(1, 2)
+        V = self.v_proj(hc_temporal).transpose(1, 2)
 
         attn_output, _ = self.mha(query=Q, key=K, value=V)
 
-        # Chuyển về (B, D, T) để ECAPA-TDNN tiếp nhận
-        output = attn_output.transpose(1, 2)
-        return self.out_proj(output)
+        # Transpose về (B, D, 1) và chiếu lại
+        output = self.out_proj(attn_output.transpose(1, 2))
+        
+        # Trả về ma trận có chiều T bằng với Handcrafted để lọt qua ECAPA-TDNN
+        T = hc_temporal.size(-1)
+        return output.expand(-1, -1, T)
 
 # ============================================================================
 # ECAPA-TDNN BACKBONE
@@ -235,7 +229,9 @@ class ECAPATDNN(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(-1)  # (B, D) -> (B, D, 1)
 
-        # Initial projection
+        if x.size(-1) == 1:
+            x = x.expand(-1, -1, 10)
+
         x = self.conv1d_1(x)
         x = self.bn_1(x)
 
@@ -347,18 +343,22 @@ class SpeakerVerificationModel(nn.Module):
             embedding = kwargs["embedding"] # (B, 13, 768)
             feature = kwargs["feature"]     # (B, C_hc, T)
             # Individual encoders
-            ptm_feat = self.ptm_encoder(embedding)  # (B, PTM_DIM)
-            # (B, 768) -> (B, 768, 1) -> (B, 768, T)
-            T = feature.size(-1)
-            ptm_feat_expanded = ptm_feat.unsqueeze(-1).expand(-1, -1, T)
-
+            ptm_feat = self.ptm_encoder(embedding)       # (B, PTM_DIM)
             hc_feat = self.handcrafted_encoder(feature)  # (B, 768, T)
             
             # Fusion
-            if self.fusion_method == "gating":
-                fused_feat, gate_weights = self.fusion(ptm_feat_expanded, hc_feat) # (B, 768, T)
+            if self.fusion_method == "cross_attention":
+                # Truyền trực tiếp, CrossAttentionFusion sẽ tự lo phần T
+                fused_feat = self.fusion(ptm_feat, hc_feat)
             else:
-                fused_feat = self.fusion(ptm_feat_expanded, hc_feat)
+                # Gating và Concat thì nhân bản PTM lên trước
+                T = feature.size(-1)
+                ptm_feat_expanded = ptm_feat.unsqueeze(-1).expand(-1, -1, T)
+                
+                if self.fusion_method == "gating":
+                    fused_feat, gate_weights = self.fusion(ptm_feat_expanded, hc_feat)
+                else:
+                    fused_feat = self.fusion(ptm_feat_expanded, hc_feat)
             
             # Backbone
             speaker_embedding = self.backbone(fused_feat)  # (B, EMBEDDING_DIM)

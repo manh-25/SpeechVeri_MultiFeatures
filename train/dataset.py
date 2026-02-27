@@ -75,23 +75,27 @@ class SpeakerDataset(Dataset):
 
 
 def collate_fn_general(batch, mode):
-    """
-    Hàm gom batch thông minh: Tự động pad chiều T cho Handcrafted features
-    """
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
     output = {"label": labels}
 
-    # Gom PTM Embeddings (Fix size: Num_layers, Dim)
     if mode in [1, 3]:
         output["embedding"] = torch.stack([item["embedding"] for item in batch])
 
-    # Gom Handcrafted Features (Dynamic Padding chiều T)
+    # Gom Handcrafted Features (Dynamic Padding chiều T bằng Replicate)
     if mode in [2, 3]:
         features = [item["feature"] for item in batch]
-        # Tìm độ dài T lớn nhất trong batch
         max_t = max([f.shape[-1] for f in features])
         
-        padded_features = [F.pad(f, (0, max_t - f.shape[-1])) for f in features]
+        padded_features = []
+        for f in features:
+            pad_len = max_t - f.shape[-1]
+            if pad_len > 0:
+                # Ép lên 3D (1, C, T) để dùng replicate padding, sau đó hạ về 2D (C, T)
+                padded_f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
+            else:
+                padded_f = f
+            padded_features.append(padded_f)
+            
         output["feature"] = torch.stack(padded_features) # Shape: (B, C, T)
 
     return output
@@ -130,36 +134,18 @@ def load_data(embedding_path, feature_dir=None, mode=1):
     return embedding_data, handcrafted_mapping, speaker_to_idx
 
 
-def create_data_loaders(
+def create_train_val_loaders(
     embedding_path, feature_path=None, mode=1, batch_size=64, num_workers=0
 ):
-    """
-    Create train, val, test dataloaders.
-
-    Args:
-        embedding_path: Path to embedding.pt
-        feature_path: Path to feature.pt (for mode 2,3)
-        mode: 1, 2, or 3
-        batch_size: Batch size
-        num_workers: Number of workers for DataLoader
-
-    Returns:
-        train_loader, val_loader, test_loader, speaker_to_idx, num_speakers
-    """
-    # Load data
+    """CHỈ DÙNG CHO LÚC TRAIN: Nhận data, trộn lên và chia 85-15 thành Train và Val"""
     embedding_data, handcrafted_mapping, speaker_to_idx = load_data(embedding_path, feature_path, mode)
-
     num_samples = len(embedding_data["speaker_ids"])
 
-    # Create indices
     indices = list(range(num_samples))
     random.seed(RANDOM_SEED)
     random.shuffle(indices)
 
-    # Split indices
     train_end = int(num_samples * TRAIN_RATIO)
-    val_end = train_end + int(num_samples * VAL_RATIO)
-
     full_dataset = SpeakerDataset(embedding_data, handcrafted_mapping, speaker_to_idx, mode)
 
     train_loader = DataLoader(
@@ -168,14 +154,21 @@ def create_data_loaders(
         collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
     )
     val_loader = DataLoader(
-        Subset(full_dataset, indices[train_end:val_end]),
+        Subset(full_dataset, indices[train_end:]),
         batch_size=batch_size, shuffle=False, num_workers=num_workers,
         collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
     )
-    test_loader = DataLoader(
-        Subset(full_dataset, indices[val_end:]),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
-    )
+    return train_loader, val_loader, speaker_to_idx, len(speaker_to_idx)
 
-    return train_loader, val_loader, test_loader, speaker_to_idx, len(speaker_to_idx)
+def create_test_loader(
+    test_embedding_path, test_feature_path=None, mode=1, batch_size=64, num_workers=0
+):
+    """CHỈ DÙNG LÚC TEST: Nhận data của Unseen Speakers và ném tất cả vào 1 Loader"""
+    embedding_data, handcrafted_mapping, speaker_to_idx = load_data(test_embedding_path, test_feature_path, mode)
+    test_dataset = SpeakerDataset(embedding_data, handcrafted_mapping, speaker_to_idx, mode)
+    
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
+    )
+    return test_loader, len(speaker_to_idx)

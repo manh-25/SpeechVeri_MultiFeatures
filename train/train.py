@@ -10,7 +10,6 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.cuda.amp import autocast, GradScaler
 import numpy as np
-from sklearn.metrics import roc_curve, auc
 import os
 import json
 import shutil
@@ -19,6 +18,9 @@ from tqdm import tqdm
 from torchinfo import summary
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+from torch.utils.tensorboard import SummaryWriter
+from dataset import create_train_val_loaders # Thay cho create_data_loaders cũ
 
 from config import (
     BATCH_SIZE,
@@ -368,6 +370,11 @@ def train(args):
     exp_dir = os.path.join(args.output_dir, "experiments", args.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
+    # Khởi tạo TensorBoard Writer
+    tb_log_dir = os.path.join(exp_dir, "tensorboard_logs")
+    writer = SummaryWriter(log_dir=tb_log_dir)
+    print(f"TensorBoard logs will be saved to: {tb_log_dir}")
+
     # Print configuration pretty
     print("\n" + "="*80)
     print("SPEAKER VERIFICATION TRAINING - CONFIGURATION")
@@ -415,11 +422,9 @@ def train(args):
         json.dump(config_snapshot, f, indent=2)
 
     # Create dataloaders
-    print("Loading data...")
-    train_loader, val_loader, test_loader, speaker_to_idx, num_speakers = (
-        create_data_loaders(
-            args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
-        )
+    print("Loading Train/Val data...")
+    train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
+        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}, Test: {len(test_loader.dataset)}\n")
@@ -441,12 +446,14 @@ def train(args):
         # Determine input key and dimension based on mode
         if args.mode == 3:
             input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM), 
-                          "feature": (args.batch_size, HANDCRAFTED_DIM, 200) 
-                          }
+                           "feature": (args.batch_size, HANDCRAFTED_DIM, 200) 
+                         }
+        elif args.mode == 1:
+            # Mode 1: PTM luôn có 13 layer
+            input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM) }
         else:
-            input_key = "embedding" if args.mode == 1 else "feature"
-            dim = PTM_DIM if args.mode == 1 else HANDCRAFTED_DIM # Nếu là Mode 2 (ECAPA), cần chiều T (ví dụ 200). Mode 1 là vector tĩnh
-            input_data = {input_key: (args.batch_size, dim, 200 if args.mode == 2 else None)}
+            # Mode 2: Handcrafted chuỗi thời gian
+            input_data = { "feature": (args.batch_size, HANDCRAFTED_DIM, 200) }
 
         model_summary = summary(model, input_size=input_data, verbose=0, device=str(device))
         
@@ -534,6 +541,13 @@ def train(args):
         training_history["val_loss"].append(val_loss)
         training_history["val_accuracy"].append(val_acc)
 
+        # Ghi log vào TensorBoard
+        writer.add_scalar("Loss/Train", train_loss, epoch)
+        writer.add_scalar("Loss/Validation", val_loss, epoch)
+        writer.add_scalar("Accuracy/Train", train_acc, epoch)
+        writer.add_scalar("Accuracy/Validation", val_acc, epoch)
+        writer.add_scalar("LearningRate", opt.param_groups[0]['lr'], epoch)
+
         # Logging
         log_msg = (
             f"Epoch {epoch + 1:3d} | "
@@ -571,12 +585,35 @@ def train(args):
     with open(history_path, "w") as f:
         json.dump(training_history, f, indent=4)
 
-    # Load best model for testing
+    # Load best model
     model, _, _, _ = load_checkpoint(os.path.join(exp_dir, BEST_MODEL_NAME), model)
 
-    # Analyze gating if applicable
+    # VẼ CONFUSION MATRIX CHO TẬP VAL
+    print("\nGenerating final Confusion Matrix on Validation Set...")
+    model.eval()
+    all_preds, all_trues = [], []
+    with torch.no_grad():
+        for batch_data in tqdm(val_loader, desc="Testing for CM", leave=False):
+            labels = batch_data["label"].to(device)
+            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+            _, embeddings = model(**inputs)
+            _, logits = criterion(None, labels, embeddings=embeddings)
+            
+            all_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
+            all_trues.extend(labels.cpu().numpy())
+
+    cm = confusion_matrix(all_trues, all_preds)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.heatmap(cm, annot=False, fmt='d', cmap='Blues', ax=ax) # Tắt annot cho đỡ rối chữ
+    ax.set_title(f'Final Confusion Matrix (Validation Set)')
+    
+    os.makedirs(os.path.join(exp_dir, "confusion_matrices"), exist_ok=True)
+    fig.savefig(os.path.join(exp_dir, "confusion_matrices", "final_val_cm.png"), dpi=150)
+    writer.add_figure("Evaluation/Confusion_Matrix_Val", fig, global_step=epoch)
+
+    # Phân tích Gating trên tập VAL
     if args.mode == 3 and args.fusion_method == "gating":
-        gates, labels = analyze_gating_behavior(model, test_loader, device, exp_dir)
+        gates, labels = analyze_gating_behavior(model, val_loader, device, exp_dir)
     else:
         gates, labels = None, None
 
@@ -608,4 +645,6 @@ def train(args):
     print(f"  Results: {os.path.join(exp_dir, 'results.json')}")
     print(f"  Model: {os.path.join(exp_dir, BEST_MODEL_NAME)}")
 
+    writer.close()
+    
     return model, training_history, exp_dir
