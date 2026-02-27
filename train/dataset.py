@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader, Subset
 import random
 import os
 import glob
-from config import RANDOM_SEED, TRAIN_RATIO, VAL_RATIO, TEST_RATIO
+from config import RANDOM_SEED, TRAIN_RATIO, VAL_RATIO
 
 
 class SpeakerDataset(Dataset):

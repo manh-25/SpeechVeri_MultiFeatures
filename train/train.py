@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import roc_curve, auc, confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
-from dataset import create_train_val_loaders # Thay cho create_data_loaders cũ
+from dataset import create_train_val_loaders
 
 from config import (
     BATCH_SIZE,
@@ -54,7 +54,6 @@ from config import (
     HANDCRAFTED_DIM,
 )
 from model import SpeakerVerificationModel, AAMSoftmaxLoss, get_model
-from dataset import create_data_loaders
 
 
 # ============================================================================
@@ -427,7 +426,7 @@ def train(args):
         args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
     )
     print(f"✓ Loaded {num_speakers} speakers")
-    print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}, Test: {len(test_loader.dataset)}\n")
+    print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
 
     # Create model
     print("Creating model...")
