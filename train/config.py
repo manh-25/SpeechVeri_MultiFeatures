@@ -63,7 +63,7 @@ EARLY_STOP_PATIENCE = 10
 EARLY_STOP_DELTA = 1e-4  # Minimum change to qualify as improvement
 
 # Learning rate scheduler
-LR_SCHEDULER = "cosine"  # "cosine" or "plateau"
+LR_SCHEDULER = "plateau"  # "cosine" or "plateau"
 COSINE_T_MAX = 50
 PLATEAU_PATIENCE = 5
 PLATEAU_FACTOR = 0.5

@@ -102,18 +102,31 @@ def collate_fn_general(batch, mode):
 
 
 def load_data(embedding_path, feature_dir=None, mode=1):
-    """
-    Load embedding and feature data from .pt files.
+    embedding_data = {"speaker_ids": [], "filenames": [], "embeddings": []}
 
-    Args:
-        embedding_path: Path to embedding.pt
-        feature_path: Path to feature.pt (required for mode 2,3)
-        mode: 1, 2, or 3
-
-    Returns:
-        embedding_data, feature_data, speaker_to_idx
-    """
-    embedding_data = torch.load(embedding_path)
+    # 1. LOAD PTM EMBEDDINGS (Hỗ trợ nhiều file Shard)
+    if mode in [1, 3]:
+        if os.path.isdir(embedding_path):
+            print(f"🔍 Đang quét các file shard PTM tại: {embedding_path}...")
+            shard_files = glob.glob(os.path.join(embedding_path, "*.pt"))
+            
+            if not shard_files:
+                raise FileNotFoundError(f"Không tìm thấy file .pt nào trong thư mục {embedding_path}")
+            
+            all_embeddings = []
+            for shard in shard_files:
+                shard_data = torch.load(shard, map_location='cpu')
+                embedding_data["speaker_ids"].extend(shard_data["speaker_ids"])
+                embedding_data["filenames"].extend(shard_data["filenames"])
+                all_embeddings.append(shard_data["embeddings"])
+                
+            # Gộp tất cả tensor embedding lại theo chiều dọc (chiều Batch - dim 0)
+            embedding_data["embeddings"] = torch.cat(all_embeddings, dim=0)
+            print(f"✅ Đã load gộp {len(shard_files)} file shards. Tổng số sample PTM: {len(embedding_data['speaker_ids'])}")
+        else:
+            # Fallback nếu truyền vào đường dẫn của 1 file duy nhất
+            embedding_data = torch.load(embedding_path, map_location='cpu')
+            print(f"✅ Đã load 1 file PTM tổng. Tổng số sample PTM: {len(embedding_data['speaker_ids'])}")
 
     # Quét thư mục Handcrafted để tạo mapping
     handcrafted_mapping = {}
@@ -127,8 +140,16 @@ def load_data(embedding_path, feature_dir=None, mode=1):
             handcrafted_mapping[os.path.basename(path)] = path
         print(f"✅ Đã tìm thấy {len(handcrafted_mapping)} file đặc trưng.")
 
-    # Build speaker mapping
-    unique_speakers = sorted(set(embedding_data["speaker_ids"]))
+    # Lấy danh sách ID người nói (Nếu mode 2 không có PTM, ta dùng list từ Handcrafted)
+    if mode == 2:
+        # Lấy ID từ tên file Handcrafted (Giả sử file đặt tên theo format spkID_uttID.pt)
+        spk_ids = [os.path.basename(f).split('_')[0] for f in handcrafted_mapping.keys()]
+        unique_speakers = sorted(set(spk_ids))
+        # Tạo embedding_data rỗng để không bị lỗi len() ở hàm create_loader
+        embedding_data = {"speaker_ids": spk_ids, "filenames": list(handcrafted_mapping.keys())}
+    else:
+        unique_speakers = sorted(set(embedding_data["speaker_ids"]))
+        
     speaker_to_idx = {spk: idx for idx, spk in enumerate(unique_speakers)}
 
     return embedding_data, handcrafted_mapping, speaker_to_idx

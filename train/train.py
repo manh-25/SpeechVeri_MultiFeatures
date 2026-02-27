@@ -360,7 +360,7 @@ def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     
-    device = torch.device(args.device)
+    device = torch.device(DEVICE)
 
     # Auto-generate experiment name if not provided
     if args.exp_name is None:
@@ -502,7 +502,7 @@ def train(args):
     scaler = GradScaler() if args.mixed_precision else None
 
     # Early stopping
-    early_stopping = EarlyStopping(patience=args.early_stop_patience, delta=args.early_stop_delta)
+    early_stopping = EarlyStopping(patience=args.early_stop_patience, delta=EARLY_STOP_DELTA)
 
     # Logging
     log_file = os.path.join(exp_dir, "training_log.txt")
