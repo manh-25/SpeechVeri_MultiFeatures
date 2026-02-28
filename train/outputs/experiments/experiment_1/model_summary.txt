@@ -1,0 +1,28 @@
+=================================================================
+Layer (type:depth-idx)                   Param #
+=================================================================
+SpeakerVerificationModel                 --
+├─PTMEncoder: 1-1                        13
+├─HandcraftedEncoder: 1-2                --
+│    └─ModalityProjector: 2-1            --
+│    │    └─Sequential: 3-1              548,096
+├─GatingMechanism: 1-3                   --
+│    └─Sequential: 2-2                   --
+│    │    └─Conv1d: 3-2                  1,180,416
+│    │    └─Sigmoid: 3-3                 --
+├─ECAPATDNN: 1-4                         --
+│    └─Conv1d: 2-3                       393,728
+│    └─BatchNorm1d: 2-4                  1,024
+│    └─ModuleList: 2-5                   --
+│    │    └─BottleneckBlock: 3-4         214,784
+│    │    └─BottleneckBlock: 3-5         214,784
+│    │    └─BottleneckBlock: 3-6         214,784
+│    │    └─BottleneckBlock: 3-7         214,784
+│    └─Conv1d: 2-6                       525,312
+│    └─Linear: 2-7                       1,049,088
+│    └─BatchNorm1d: 2-8                  1,024
+=================================================================
+Total params: 4,557,837
+Trainable params: 4,557,837
+Non-trainable params: 0
+=================================================================

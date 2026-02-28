@@ -81,7 +81,7 @@ class ModalityProjector(nn.Module):
 class HandcraftedEncoder(nn.Module):
     def __init__(self, input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode="mfbe_pitch"):
         super().__init__()
-        self.projector = ModalityProjector(input_dim, output_dim, feature_mode)
+        self.projector = ModalityProjector(input_dim, output_dim)
 
     def forward(self, x):
         return self.projector(x)

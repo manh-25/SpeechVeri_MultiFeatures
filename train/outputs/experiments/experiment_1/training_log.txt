@@ -1,0 +1,21 @@
+Training started: 2026-02-28 22:48:33.428793
+{
+  "exp_name": "experiment_1",
+  "timestamp": "2026-02-28T22:48:27.204266",
+  "device": "cuda",
+  "mode": 3,
+  "fusion_method": "gating",
+  "feature_mode": "mfbe_pitch",
+  "use_gating": true,
+  "learning_rate": 0.001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 100,
+  "weight_decay": 0.0001,
+  "mixed_precision": true,
+  "early_stop_patience": 10,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+

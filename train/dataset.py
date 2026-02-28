@@ -9,6 +9,7 @@ import random
 import os
 import glob
 from config import RANDOM_SEED, TRAIN_RATIO, VAL_RATIO
+from functools import partial
 
 
 class SpeakerDataset(Dataset):
@@ -40,6 +41,8 @@ class SpeakerDataset(Dataset):
         self.num_speakers = len(self.speaker_to_idx)
         self.num_samples = len(embedding_data["speaker_ids"])
 
+        self.feature_cache = {}
+
     def __len__(self):
         return self.num_samples
 
@@ -57,24 +60,24 @@ class SpeakerDataset(Dataset):
         # 2. Handcrafted Feature (Giữ nguyên C, T để cho ECAPA-TDNN)
         if self.mode in [2, 3]:
             pt_filename = os.path.splitext(wav_filename)[0] + ".pt"
-            if pt_filename not in self.handcrafted_mapping:
-                raise FileNotFoundError(f"Không tìm thấy file feature cho {wav_filename}")
-
-            feature_path = self.handcrafted_mapping[pt_filename]
             
-            # Load tensor shape (C, T)
-            feature = torch.load(feature_path, map_location='cpu').float()
-            
-            # Đảm bảo có chiều C nếu là 1D
-            if feature.dim() == 1:
-                feature = feature.unsqueeze(0)
+            # NẾU FILE ĐÃ CÓ TRONG RAM, LẤY RA DÙNG LUÔN (Bỏ qua ổ cứng)
+            if pt_filename in self.feature_cache:
+                data["feature"] = self.feature_cache[pt_filename]
+            else:
+                # NẾU CHƯA CÓ, ĐỌC TỪ Ổ CỨNG VÀ LƯU VÀO RAM
+                feature_path = self.handcrafted_mapping[pt_filename]
+                feature = torch.load(feature_path, map_location='cpu').float()
+                if feature.dim() == 1:
+                    feature = feature.unsqueeze(0)
                 
-            data["feature"] = feature 
+                self.feature_cache[pt_filename] = feature # Lưu cache
+                data["feature"] = feature 
 
         return data
 
 
-def collate_fn_general(batch, mode):
+def collate_fn_general(batch, mode, is_train=True, max_frames=200):
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
     output = {"label": labels}
 
@@ -84,19 +87,34 @@ def collate_fn_general(batch, mode):
     # Gom Handcrafted Features (Dynamic Padding chiều T bằng Replicate)
     if mode in [2, 3]:
         features = [item["feature"] for item in batch]
-        max_t = max([f.shape[-1] for f in features])
+        processed_features = []
         
-        padded_features = []
-        for f in features:
-            pad_len = max_t - f.shape[-1]
-            if pad_len > 0:
-                # Ép lên 3D (1, C, T) để dùng replicate padding, sau đó hạ về 2D (C, T)
-                padded_f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
-            else:
-                padded_f = f
-            padded_features.append(padded_f)
+        if is_train:
+            # TỐI ƯU TỐC ĐỘ: Cắt ngẫu nhiên 200 frames lúc Train (Cực kỳ nhanh + Tăng Data Augmentation)
+            for f in features:
+                c, t = f.shape
+                if t > max_frames:
+                    start = random.randint(0, t - max_frames)
+                    f = f[:, start:start + max_frames]
+                elif t < max_frames:
+                    pad_len = max_frames - t
+                    f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
+                processed_features.append(f)
+        else:
+            # Lúc Val/Test: Giữ nguyên độ dài, nhưng CẮT BỎ phần thừa nếu dài quá 10 giây
+            max_t = max([f.shape[-1] for f in features])
+            max_t = min(max_t, 1000) # <-- SAFETY CAP CHỐNG TRÀN VRAM
             
-        output["feature"] = torch.stack(padded_features) # Shape: (B, C, T)
+            for f in features:
+                if f.shape[-1] > max_t:
+                    f = f[:, :max_t] # Cắt cụt nếu dài hơn max_t
+                
+                pad_len = max_t - f.shape[-1]
+                if pad_len > 0:
+                    f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
+                processed_features.append(f)
+            
+        output["feature"] = torch.stack(processed_features)
 
     return output
 
@@ -122,6 +140,7 @@ def load_data(embedding_path, feature_dir=None, mode=1):
                 
             # Gộp tất cả tensor embedding lại theo chiều dọc (chiều Batch - dim 0)
             embedding_data["embeddings"] = torch.cat(all_embeddings, dim=0)
+            embedding_data["embeddings"].share_memory_()
             print(f"✅ Đã load gộp {len(shard_files)} file shards. Tổng số sample PTM: {len(embedding_data['speaker_ids'])}")
         else:
             # Fallback nếu truyền vào đường dẫn của 1 file duy nhất
@@ -172,12 +191,17 @@ def create_train_val_loaders(
     train_loader = DataLoader(
         Subset(full_dataset, indices[:train_end]),
         batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
+        # Thay lambda bằng partial
+        collate_fn=partial(collate_fn_general, mode=mode, is_train=True), 
+        pin_memory=False,
+        prefetch_factor=4
     )
     val_loader = DataLoader(
         Subset(full_dataset, indices[train_end:]),
-        batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
+        batch_size=32, shuffle=False, num_workers=0,
+        # Thay lambda bằng partial
+        collate_fn=partial(collate_fn_general, mode=mode, is_train=False), 
+        pin_memory=False
     )
     return train_loader, val_loader, speaker_to_idx, len(speaker_to_idx)
 
@@ -189,7 +213,9 @@ def create_test_loader(
     test_dataset = SpeakerDataset(embedding_data, handcrafted_mapping, speaker_to_idx, mode)
     
     test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        collate_fn=lambda b: collate_fn_general(b, mode), pin_memory=True
+        test_dataset, batch_size=32, shuffle=False, num_workers=num_workers,
+        # Thay lambda bằng partial
+        collate_fn=partial(collate_fn_general, mode=mode, is_train=False), 
+        pin_memory=False
     )
     return test_loader, len(speaker_to_idx)

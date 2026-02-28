@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.cuda.amp import autocast, GradScaler
+import torch.backends.cudnn as cudnn
 import numpy as np
 import os
 import json
@@ -21,6 +22,7 @@ import seaborn as sns
 from sklearn.metrics import roc_curve, auc, confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
 from dataset import create_train_val_loaders
+
 
 from config import (
     BATCH_SIZE,
@@ -353,6 +355,7 @@ def train(args):
         args: argparse.Namespace object with training configuration
     """
     # Setup
+    cudnn.benchmark = True
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
@@ -423,7 +426,7 @@ def train(args):
     # Create dataloaders
     print("Loading Train/Val data...")
     train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
-        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
+        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=16
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
@@ -442,19 +445,19 @@ def train(args):
     # Save model summary
     print("\nGenerating model summary...")
     try:
-        # Determine input key and dimension based on mode
+        # Tạo dummy tensors theo mode thay vì dict shape
         if args.mode == 3:
-            input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM), 
-                           "feature": (args.batch_size, HANDCRAFTED_DIM, 200) 
-                         }
+            dummy_inputs = { 
+                "embedding": torch.randn(args.batch_size, PTM_NUM_LAYERS, PTM_DIM).to(device), 
+                "feature": torch.randn(args.batch_size, HANDCRAFTED_DIM, 200).to(device) 
+            }
         elif args.mode == 1:
-            # Mode 1: PTM luôn có 13 layer
-            input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM) }
+            dummy_inputs = { "embedding": torch.randn(args.batch_size, PTM_NUM_LAYERS, PTM_DIM).to(device) }
         else:
-            # Mode 2: Handcrafted chuỗi thời gian
-            input_data = { "feature": (args.batch_size, HANDCRAFTED_DIM, 200) }
+            dummy_inputs = { "feature": torch.randn(args.batch_size, HANDCRAFTED_DIM, 200).to(device) }
 
-        model_summary = summary(model, input_size=input_data, verbose=0, device=str(device))
+        # Truyền thẳng dummy_inputs dưới dạng **kwargs vào torchinfo
+        model_summary = summary(model, **dummy_inputs, verbose=0)
         
         with open(os.path.join(exp_dir, "model_summary.txt"), "w", encoding="utf-8") as f:
             f.write(str(model_summary))
@@ -492,7 +495,6 @@ def train(args):
             mode="min",
             factor=PLATEAU_FACTOR,
             patience=PLATEAU_PATIENCE,
-            verbose=True,
         )
     else:
         raise ValueError(f"Unknown scheduler: {args.lr_scheduler}")
