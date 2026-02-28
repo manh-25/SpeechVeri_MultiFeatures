@@ -21,7 +21,7 @@ class SpeakerDataset(Dataset):
     - Mode 3: Both PTM and handcrafted features
     """
 
-    def __init__(self, embedding_data, handcrafted_mapping=None, speaker_to_idx=None, mode=1):
+    def __init__(self, embedding_data, feature_data=None, speaker_to_idx=None, mode=1):
         """
         Args:
             embedding_data: Dict chứa PTM embeddings (đã load từ shard)
@@ -30,7 +30,7 @@ class SpeakerDataset(Dataset):
         """
         self.mode = mode
         self.embedding_data = embedding_data
-        self.handcrafted_mapping = handcrafted_mapping
+        self.feature_data = feature_data
         self.speaker_to_idx = speaker_to_idx or {}
 
         # Build speaker_to_idx if not provided
@@ -59,20 +59,7 @@ class SpeakerDataset(Dataset):
 
         # 2. Handcrafted Feature (Giữ nguyên C, T để cho ECAPA-TDNN)
         if self.mode in [2, 3]:
-            pt_filename = os.path.splitext(wav_filename)[0] + ".pt"
-            
-            # NẾU FILE ĐÃ CÓ TRONG RAM, LẤY RA DÙNG LUÔN (Bỏ qua ổ cứng)
-            if pt_filename in self.feature_cache:
-                data["feature"] = self.feature_cache[pt_filename]
-            else:
-                # NẾU CHƯA CÓ, ĐỌC TỪ Ổ CỨNG VÀ LƯU VÀO RAM
-                feature_path = self.handcrafted_mapping[pt_filename]
-                feature = torch.load(feature_path, map_location='cpu').float()
-                if feature.dim() == 1:
-                    feature = feature.unsqueeze(0)
-                
-                self.feature_cache[pt_filename] = feature # Lưu cache
-                data["feature"] = feature 
+            data["feature"] = self.feature_data["features"][idx].float()
 
         return data
 
@@ -121,6 +108,7 @@ def collate_fn_general(batch, mode, is_train=True, max_frames=200):
 
 def load_data(embedding_path, feature_dir=None, mode=1):
     embedding_data = {"speaker_ids": [], "filenames": [], "embeddings": []}
+    feature_data = {"features": []}
 
     # 1. LOAD PTM EMBEDDINGS (Hỗ trợ nhiều file Shard)
     if mode in [1, 3]:
@@ -151,34 +139,33 @@ def load_data(embedding_path, feature_dir=None, mode=1):
     handcrafted_mapping = {}
     if mode in [2, 3]:
         if feature_dir is None or not os.path.isdir(feature_dir):
-            raise ValueError(f"Mode {mode} yêu cầu feature_dir là đường dẫn thư mục")
+            raise ValueError(f"Mode {mode} yêu cầu feature_dir là đường dẫn thư mục chứa Shards")
         
-        print(f"🔍 Đang quét đặc trưng tại: {feature_dir}...")
-        all_pt_files = glob.glob(os.path.join(feature_dir, "**", "*.pt"), recursive=True)
-        for path in all_pt_files:
-            handcrafted_mapping[os.path.basename(path)] = path
-        print(f"✅ Đã tìm thấy {len(handcrafted_mapping)} file đặc trưng.")
+        print(f"🔍 Đang nạp các file shard Handcrafted từ: {feature_dir}...")
+        hc_shards = sorted(glob.glob(os.path.join(feature_dir, "*.pt")))
+        
+        for shard in hc_shards:
+            shard_data = torch.load(shard, map_location='cpu')
+            feature_data["features"].extend(shard_data["features"])
+            
+            # Nếu chạy Mode 2, cần mượn speaker_ids từ tập Handcrafted
+            if mode == 2:
+                embedding_data["speaker_ids"].extend(shard_data["speaker_ids"])
+                embedding_data["filenames"].extend(shard_data["filenames"])
+                
+        print(f"✅ Đã nạp xong {len(hc_shards)} HC shards vào RAM.")
 
-    # Lấy danh sách ID người nói (Nếu mode 2 không có PTM, ta dùng list từ Handcrafted)
-    if mode == 2:
-        # Lấy ID từ tên file Handcrafted (Giả sử file đặt tên theo format spkID_uttID.pt)
-        spk_ids = [os.path.basename(f).split('_')[0] for f in handcrafted_mapping.keys()]
-        unique_speakers = sorted(set(spk_ids))
-        # Tạo embedding_data rỗng để không bị lỗi len() ở hàm create_loader
-        embedding_data = {"speaker_ids": spk_ids, "filenames": list(handcrafted_mapping.keys())}
-    else:
-        unique_speakers = sorted(set(embedding_data["speaker_ids"]))
-        
+    unique_speakers = sorted(set(embedding_data["speaker_ids"]))
     speaker_to_idx = {spk: idx for idx, spk in enumerate(unique_speakers)}
 
-    return embedding_data, handcrafted_mapping, speaker_to_idx
+    return embedding_data, feature_data, speaker_to_idx
 
 
 def create_train_val_loaders(
     embedding_path, feature_path=None, mode=1, batch_size=64, num_workers=0
 ):
     """CHỈ DÙNG CHO LÚC TRAIN: Nhận data, trộn lên và chia 85-15 thành Train và Val"""
-    embedding_data, handcrafted_mapping, speaker_to_idx = load_data(embedding_path, feature_path, mode)
+    embedding_data, feature_data, speaker_to_idx = load_data(embedding_path, feature_path, mode)
     num_samples = len(embedding_data["speaker_ids"])
 
     indices = list(range(num_samples))
@@ -186,7 +173,7 @@ def create_train_val_loaders(
     random.shuffle(indices)
 
     train_end = int(num_samples * TRAIN_RATIO)
-    full_dataset = SpeakerDataset(embedding_data, handcrafted_mapping, speaker_to_idx, mode)
+    full_dataset = SpeakerDataset(embedding_data, feature_data, speaker_to_idx, mode)
 
     train_loader = DataLoader(
         Subset(full_dataset, indices[:train_end]),
@@ -209,8 +196,8 @@ def create_test_loader(
     test_embedding_path, test_feature_path=None, mode=1, batch_size=64, num_workers=0
 ):
     """CHỈ DÙNG LÚC TEST: Nhận data của Unseen Speakers và ném tất cả vào 1 Loader"""
-    embedding_data, handcrafted_mapping, speaker_to_idx = load_data(test_embedding_path, test_feature_path, mode)
-    test_dataset = SpeakerDataset(embedding_data, handcrafted_mapping, speaker_to_idx, mode)
+    embedding_data, feature_data, speaker_to_idx = load_data(test_embedding_path, test_feature_path, mode)
+    test_dataset = SpeakerDataset(embedding_data, feature_data, speaker_to_idx, mode)
     
     test_loader = DataLoader(
         test_dataset, batch_size=32, shuffle=False, num_workers=num_workers,

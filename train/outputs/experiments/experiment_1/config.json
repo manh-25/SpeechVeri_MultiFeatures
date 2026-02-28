@@ -1,6 +1,6 @@
 {
   "exp_name": "experiment_1",
-  "timestamp": "2026-02-28T22:48:27.204266",
+  "timestamp": "2026-03-01T00:33:02.575797",
   "device": "cuda",
   "mode": 3,
   "fusion_method": "gating",

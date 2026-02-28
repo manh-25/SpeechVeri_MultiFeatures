@@ -1,7 +1,7 @@
-Training started: 2026-02-28 22:48:33.428793
+Training started: 2026-03-01 00:33:44.573547
 {
   "exp_name": "experiment_1",
-  "timestamp": "2026-02-28T22:48:27.204266",
+  "timestamp": "2026-03-01T00:33:02.575797",
   "device": "cuda",
   "mode": 3,
   "fusion_method": "gating",
@@ -19,3 +19,14 @@ Training started: 2026-02-28 22:48:33.428793
   "aam_scale": 30
 }
 
+Epoch   1 | Train Loss: 3.8922, Acc: 0.5132 | Val Loss: 2.3377, Acc: 0.6475 | LR: 0.001000
+Epoch   2 | Train Loss: 1.8306, Acc: 0.7038 | Val Loss: 1.8525, Acc: 0.7073 | LR: 0.001000
+Epoch   3 | Train Loss: 1.5109, Acc: 0.7459 | Val Loss: 1.7119, Acc: 0.7260 | LR: 0.001000
+Epoch   4 | Train Loss: 1.3693, Acc: 0.7654 | Val Loss: 1.5975, Acc: 0.7466 | LR: 0.001000
+Epoch   5 | Train Loss: 1.2836, Acc: 0.7791 | Val Loss: 1.5463, Acc: 0.7550 | LR: 0.001000
+Epoch   6 | Train Loss: 1.2172, Acc: 0.7893 | Val Loss: 1.6151, Acc: 0.7416 | LR: 0.001000
+Epoch   7 | Train Loss: 1.1647, Acc: 0.7971 | Val Loss: 1.4519, Acc: 0.7698 | LR: 0.001000
+Epoch   8 | Train Loss: 1.1282, Acc: 0.8022 | Val Loss: 1.4485, Acc: 0.7723 | LR: 0.001000
+Epoch   9 | Train Loss: 1.0848, Acc: 0.8087 | Val Loss: 1.4192, Acc: 0.7749 | LR: 0.001000
+Epoch  10 | Train Loss: 1.0560, Acc: 0.8133 | Val Loss: 1.4580, Acc: 0.7707 | LR: 0.001000
+Epoch  11 | Train Loss: 1.0222, Acc: 0.8187 | Val Loss: 1.3951, Acc: 0.7768 | LR: 0.001000

@@ -426,7 +426,7 @@ def train(args):
     # Create dataloaders
     print("Loading Train/Val data...")
     train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
-        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=16
+        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=4
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
