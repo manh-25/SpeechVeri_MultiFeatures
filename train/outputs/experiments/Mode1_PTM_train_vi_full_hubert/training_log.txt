@@ -38,3 +38,6 @@ Epoch  14 | Train Loss: 0.1253, Acc: 0.9741 | Val Loss: 0.8953, Acc: 0.8702 | LR
 Epoch  15 | Train Loss: 0.1147, Acc: 0.9763 | Val Loss: 0.9114, Acc: 0.8729 | LR: 0.001000
 Epoch  16 | Train Loss: 0.1105, Acc: 0.9772 | Val Loss: 0.9122, Acc: 0.8700 | LR: 0.001000
 Epoch  17 | Train Loss: 0.1018, Acc: 0.9791 | Val Loss: 0.8982, Acc: 0.8730 | LR: 0.001000
+Epoch  18 | Train Loss: 0.0937, Acc: 0.9811 | Val Loss: 0.9069, Acc: 0.8732 | LR: 0.001000
+Epoch  19 | Train Loss: 0.0951, Acc: 0.9808 | Val Loss: 0.9176, Acc: 0.8711 | LR: 0.001000
+Early stopping triggered!
