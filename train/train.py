@@ -204,7 +204,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         if MIXED_PRECISION:
             with autocast():
                 _, embeddings = model(**inputs)
-                loss, logits = criterion(None, labels, embeddings=embeddings)
+            loss, logits = criterion(None, labels, embeddings=embeddings.float())
         else:
             _, embeddings = model(**inputs)
             loss, logits = criterion(None, labels, embeddings=embeddings)
@@ -405,10 +405,12 @@ def train(args):
         "exp_name": args.exp_name,
         "timestamp": datetime.now().isoformat(),
         "device": str(device),
+        "duration": getattr(args, 'duration', 'unknown'),             
+        "pretrained_model": getattr(args, 'pretrained_model', 'N/A'),
         "mode": args.mode,
-        "fusion_method": args.fusion_method,
+        "fusion_method": getattr(args, 'fusion_method', 'N/A'),
         "feature_mode": args.feature_mode,
-        "use_gating": args.use_gating,
+        "use_gating": getattr(args, 'use_gating', False),
         "learning_rate": args.learning_rate,
         "optimizer": args.optimizer,
         "batch_size": args.batch_size,

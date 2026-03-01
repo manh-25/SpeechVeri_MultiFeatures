@@ -37,6 +37,7 @@ class PTMEncoder(nn.Module):
         super().__init__()
         # Learnable weights for each layer
         self.weights = nn.Parameter(torch.ones(num_layers) / num_layers)
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
         """
@@ -49,6 +50,7 @@ class PTMEncoder(nn.Module):
         normalized_weights = F.softmax(self.weights, dim=0)
         # Weighted sum across layers: (batch_size, dim)
         output = (x * normalized_weights.view(1, -1, 1)).sum(dim=1)
+        output = self.norm(output)
         return output
 
 
@@ -182,12 +184,18 @@ class AttentiveStatisticsPooling(nn.Module):
         )
 
     def forward(self, x):
-        # x: (Batch, Channels, Time)
         w = self.attention(x) # Trọng số attention cho từng frame
-        mu = torch.sum(x * w, dim=2) # Mean có trọng số
-        # Std có trọng số
-        sg = torch.sqrt((torch.sum((x**2) * w, dim=2) - mu**2).clamp(min=1e-5))
-        return torch.cat((mu, sg), 1)
+        
+        # Ép kiểu float32 để chống tràn số (overflow)
+        x_f32 = x.float()
+        w_f32 = w.float()
+        
+        # DÙNG BIẾN f32 ĐỂ TÍNH TOÁN
+        mu = torch.sum(x_f32 * w_f32, dim=2)
+        sg = torch.sqrt((torch.sum((x_f32**2) * w_f32, dim=2) - mu**2).clamp(min=1e-5))
+        
+        # Ghép lại và trả về kiểu dữ liệu gốc (float16) để đưa vào các lớp Linear tiếp theo
+        return torch.cat((mu, sg), 1).type_as(x)
 
 # ============================================================================
 # ECAPA-TDNN BACKBONE (NÂNG CẤP SOTA)
@@ -429,7 +437,7 @@ class AAMSoftmaxLoss(nn.Module):
 
     def forward(self, logits, labels, embeddings=None):
         cosine = F.linear(F.normalize(embeddings), F.normalize(self.weight))
-        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(0, 1))
+        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(1e-7, 1.0))
         phi = cosine * self.cos_m - sine * self.sin_m
         phi = torch.where(cosine > self.th, phi, cosine - self.mm)
         one_hot = torch.zeros(cosine.size(), device=embeddings.device)
