@@ -20,6 +20,7 @@ from config import (
     AAM_SCALE,
     MODE,
     FUSION_METHOD,
+    DIM_MAP,
 )
 
 
@@ -37,6 +38,7 @@ class PTMEncoder(nn.Module):
         super().__init__()
         # Learnable weights for each layer
         self.weights = nn.Parameter(torch.ones(num_layers) / num_layers)
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
         """
@@ -49,6 +51,7 @@ class PTMEncoder(nn.Module):
         normalized_weights = F.softmax(self.weights, dim=0)
         # Weighted sum across layers: (batch_size, dim)
         output = (x * normalized_weights.view(1, -1, 1)).sum(dim=1)
+        output = self.norm(output)
         return output
 
 
@@ -58,30 +61,29 @@ class PTMEncoder(nn.Module):
 class ModalityProjector(nn.Module):
     """
     Projects handcrafted features to embedding space.
-    Supports multiple feature modes.
+    Đã nâng cấp Kernel Size để bắt ngữ cảnh thời gian (Temporal Context).
     """
-
     def __init__(self, input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv1d(input_dim, 256, kernel_size=1),
+            # Nhìn rộng ra 5 frames
+            nn.Conv1d(input_dim, 256, kernel_size=5, padding=2),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Conv1d(256, 512, kernel_size=1),
+            # Nhìn rộng ra 3 frames
+            nn.Conv1d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Conv1d(512, output_dim, kernel_size=1),
         )
 
     def forward(self, x):
-        # x lúc này là (B, C, T)
         return self.net(x)
-
 
 class HandcraftedEncoder(nn.Module):
     def __init__(self, input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode="mfbe_pitch"):
         super().__init__()
-        self.projector = ModalityProjector(input_dim, output_dim, feature_mode)
+        self.projector = ModalityProjector(input_dim, output_dim)
 
     def forward(self, x):
         return self.projector(x)
@@ -153,42 +155,90 @@ class CrossAttentionFusion(nn.Module):
         return output.expand(-1, -1, T)
 
 # ============================================================================
-# ECAPA-TDNN BACKBONE
+# SQUEEZE-AND-EXCITATION & ASP POOLING
+# ============================================================================
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation Block 1D"""
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(channels, channels // reduction, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(channels // reduction, channels, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return x * self.se(x)
+
+
+class AttentiveStatisticsPooling(nn.Module):
+    """Tự động tìm và đánh trọng số cho các frame chứa giọng nói (Bỏ qua khoảng lặng)"""
+    def __init__(self, channels):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Conv1d(channels, 128, kernel_size=1),
+            nn.Tanh(),
+            nn.Conv1d(128, channels, kernel_size=1),
+            nn.Softmax(dim=2)
+        )
+
+    def forward(self, x):
+        w = self.attention(x) # Trọng số attention cho từng frame
+        
+        # Ép kiểu float32 để chống tràn số (overflow)
+        x_f32 = x.float()
+        w_f32 = w.float()
+        
+        # DÙNG BIẾN f32 ĐỂ TÍNH TOÁN
+        mu = torch.sum(x_f32 * w_f32, dim=2)
+        sg = torch.sqrt((torch.sum((x_f32**2) * w_f32, dim=2) - mu**2).clamp(min=1e-5))
+        
+        # Ghép lại và trả về kiểu dữ liệu gốc (float16) để đưa vào các lớp Linear tiếp theo
+        return torch.cat((mu, sg), 1).type_as(x)
+
+# ============================================================================
+# ECAPA-TDNN BACKBONE (NÂNG CẤP SOTA)
 # ============================================================================
 class BottleneckBlock(nn.Module):
-    """Bottleneck block for ECAPA-TDNN"""
-
+    """Bottleneck block tích hợp Squeeze-and-Excitation (SE)"""
     def __init__(
         self,
         channels=ECAPA_CHANNELS,
         kernel_size=ECAPA_KERNEL_SIZE,
-        dilation=ECAPA_DILATION,
+        dilation=1,
     ):
         super().__init__()
         self.conv1x1_1 = nn.Conv1d(channels, 128, kernel_size=1)
+        self.bn1 = nn.BatchNorm1d(128)
+        
         self.conv1d = nn.Conv1d(
-            128, 128, kernel_size=kernel_size, padding=(kernel_size - 1) // 2
+            128, 128, kernel_size=kernel_size, 
+            padding=(kernel_size * dilation - dilation) // 2, # Padding chuẩn để không lệch size
+            dilation=dilation
         )
+        self.bn2 = nn.BatchNorm1d(128)
+        
         self.conv1x1_2 = nn.Conv1d(128, channels, kernel_size=1)
-        self.bn = nn.BatchNorm1d(channels)
+        self.bn3 = nn.BatchNorm1d(channels)
+        
+        # Thêm não SE
+        self.se = SEBlock(channels)
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        """x: (batch_size, channels, time)"""
         residual = x
-        x = self.conv1x1_1(x)
-        x = self.relu(x)
-        x = self.conv1d(x)
-        x = self.relu(x)
-        x = self.conv1x1_2(x)
+        x = self.relu(self.bn1(self.conv1x1_1(x)))
+        x = self.relu(self.bn2(self.conv1d(x)))
+        x = self.bn3(self.conv1x1_2(x))
+        x = self.se(x) # Lọc nhiễu channel trước khi cộng
         x = x + residual
-        x = self.bn(x)
         return x
 
 
 class ECAPATDNN(nn.Module):
-    """ECAPA-TDNN for speaker embedding extraction"""
-
+    """ECAPA-TDNN (Tích hợp SE, Dilation động, MFA và ASP)"""
     def __init__(
         self,
         input_dim,
@@ -199,60 +249,54 @@ class ECAPATDNN(nn.Module):
     ):
         super().__init__()
 
-        # Initial projection
         self.conv1d_1 = nn.Conv1d(input_dim, channels, kernel_size=1)
         self.bn_1 = nn.BatchNorm1d(channels)
+        self.relu = nn.ReLU()
 
-        # TDNN blocks
-        self.blocks = nn.ModuleList(
-            [
-                BottleneckBlock(channels, kernel_size, dilation=1)
-                for _ in range(blocks)
-            ]
-        )
+        # TDNN blocks với Dilation tăng dần (2, 3, 4...) để mở rộng tầm nhìn
+        self.blocks = nn.ModuleList([
+            BottleneckBlock(channels, kernel_size, dilation=d)
+            for d in range(2, 2 + blocks)
+        ])
 
-        # Statistics pooling
-        self.conv1d_last = nn.Conv1d(channels, channels * 2, kernel_size=1)
+        # MFA (Multi-layer Feature Aggregation): Nối output của CẢ 4 block lại với nhau
+        self.mfa = nn.Conv1d(channels * (blocks + 1), channels * 3, kernel_size=1)
+
+        # Trí tuệ của mạng: Attentive Statistics Pooling
+        self.pooling = AttentiveStatisticsPooling(channels * 3)
+        self.bn_pool = nn.BatchNorm1d(channels * 3 * 2)
 
         # Embedding layers
-        self.fc1 = nn.Linear(channels * 2 * 2, embedding_dim)  # *2 for mean+std
+        self.fc1 = nn.Linear(channels * 3 * 2, embedding_dim)
         self.bn_fc = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x):
-        """
-        Args:
-            x: (batch_size, input_dim, time) or (batch_size, input_dim) for 1D input
-        Returns:
-            embedding: (batch_size, embedding_dim)
-        """
-        # Handle 2D input
         if x.dim() == 2:
-            x = x.unsqueeze(-1)  # (B, D) -> (B, D, 1)
-
+            x = x.unsqueeze(-1)
         if x.size(-1) == 1:
             x = x.expand(-1, -1, 10)
 
-        x = self.conv1d_1(x)
-        x = self.bn_1(x)
+        x = self.relu(self.bn_1(self.conv1d_1(x)))
 
-        # TDNN blocks
+        # Chạy qua các block và gom nhặt lại mọi đặc trưng (MFA)
+        layer_outputs = [x]
         for block in self.blocks:
             x = block(x)
+            layer_outputs.append(x)
 
-        # Final projection
-        x = self.conv1d_last(x)
+        # Nối tất cả các lớp lại
+        x = torch.cat(layer_outputs, dim=1)
+        x = self.mfa(x)
 
-        # Statistics pooling: mean and std
-        mean = x.mean(dim=-1)  # (B, channels*2)
-        std = x.std(dim=-1)
-        x = torch.cat([mean, std], dim=1)  # (B, channels*4)
+        # Pooling có chú ý (ASP)
+        x = self.pooling(x)
+        x = self.bn_pool(x)
 
-        # Embedding
+        # Ra Embedding
         x = self.fc1(x)
         x = self.bn_fc(x)
 
         return x
-
 
 # ============================================================================
 # COMPLETE MODEL
@@ -268,6 +312,8 @@ class SpeakerVerificationModel(nn.Module):
         self.use_gating = use_gating
         self.num_speakers = num_speakers
 
+        actual_input_dim = DIM_MAP.get(feature_mode, 81)
+
         # Mode 1: PTM only
         if mode == 1:
             self.ptm_encoder = PTMEncoder()
@@ -276,7 +322,7 @@ class SpeakerVerificationModel(nn.Module):
         # Mode 2: Handcrafted only
         elif mode == 2:
             self.handcrafted_encoder = HandcraftedEncoder(
-                input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode=feature_mode
+                input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
             self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
 
@@ -284,7 +330,7 @@ class SpeakerVerificationModel(nn.Module):
         elif mode == 3:
             self.ptm_encoder = PTMEncoder()
             self.handcrafted_encoder = HandcraftedEncoder(
-                input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode=feature_mode
+                input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
 
             if fusion_method == "concat":
@@ -394,7 +440,7 @@ class AAMSoftmaxLoss(nn.Module):
 
     def forward(self, logits, labels, embeddings=None):
         cosine = F.linear(F.normalize(embeddings), F.normalize(self.weight))
-        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(0, 1))
+        sine = torch.sqrt((1.0 - torch.pow(cosine, 2)).clamp(1e-7, 1.0))
         phi = cosine * self.cos_m - sine * self.sin_m
         phi = torch.where(cosine > self.th, phi, cosine - self.mm)
         one_hot = torch.zeros(cosine.size(), device=embeddings.device)

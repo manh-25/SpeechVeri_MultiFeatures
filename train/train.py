@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.cuda.amp import autocast, GradScaler
+import torch.backends.cudnn as cudnn
 import numpy as np
 import os
 import json
@@ -21,6 +22,7 @@ import seaborn as sns
 from sklearn.metrics import roc_curve, auc, confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
 from dataset import create_train_val_loaders
+
 
 from config import (
     BATCH_SIZE,
@@ -52,6 +54,7 @@ from config import (
     PTM_DIM,
     PTM_NUM_LAYERS,
     HANDCRAFTED_DIM,
+    DIM_MAP,
 )
 from model import SpeakerVerificationModel, AAMSoftmaxLoss, get_model
 
@@ -196,13 +199,20 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         labels = batch_data["label"].to(device)
         inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
+        if "embedding" in inputs and torch.isnan(inputs["embedding"]).any():
+            print(f"\n🚨 PHÁT HIỆN DỮ LIỆU PTM BỊ NaN Ở BATCH {batch_idx}! Đã bỏ qua batch này.")
+            continue
+        if "feature" in inputs and torch.isnan(inputs["feature"]).any():
+            print(f"\n🚨 PHÁT HIỆN FEATURE HC BỊ NaN Ở BATCH {batch_idx}! Đã bỏ qua batch này.")
+            continue
+        
         optimizer.zero_grad()
 
         # Forward pass with mixed precision
         if MIXED_PRECISION:
             with autocast():
                 _, embeddings = model(**inputs)
-                loss, logits = criterion(None, labels, embeddings=embeddings)
+            loss, logits = criterion(None, labels, embeddings=embeddings.float())
         else:
             _, embeddings = model(**inputs)
             loss, logits = criterion(None, labels, embeddings=embeddings)
@@ -353,6 +363,7 @@ def train(args):
         args: argparse.Namespace object with training configuration
     """
     # Setup
+    cudnn.benchmark = True
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
@@ -402,10 +413,12 @@ def train(args):
         "exp_name": args.exp_name,
         "timestamp": datetime.now().isoformat(),
         "device": str(device),
+        "duration": getattr(args, 'duration', 'unknown'),             
+        "pretrained_model": getattr(args, 'pretrained_model', 'N/A'),
         "mode": args.mode,
-        "fusion_method": args.fusion_method,
+        "fusion_method": getattr(args, 'fusion_method', 'N/A'),
         "feature_mode": args.feature_mode,
-        "use_gating": args.use_gating,
+        "use_gating": getattr(args, 'use_gating', False),
         "learning_rate": args.learning_rate,
         "optimizer": args.optimizer,
         "batch_size": args.batch_size,
@@ -423,7 +436,7 @@ def train(args):
     # Create dataloaders
     print("Loading Train/Val data...")
     train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
-        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
+        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=4
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
@@ -442,19 +455,20 @@ def train(args):
     # Save model summary
     print("\nGenerating model summary...")
     try:
-        # Determine input key and dimension based on mode
+        actual_input_dim = DIM_MAP.get(args.feature_mode, 81)
+        # Tạo dummy tensors theo mode thay vì dict shape
         if args.mode == 3:
-            input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM), 
-                           "feature": (args.batch_size, HANDCRAFTED_DIM, 200) 
-                         }
+            dummy_inputs = { 
+                "embedding": torch.randn(args.batch_size, PTM_NUM_LAYERS, PTM_DIM).to(device), 
+                "feature": torch.randn(args.batch_size, actual_input_dim, 200).to(device) 
+            }
         elif args.mode == 1:
-            # Mode 1: PTM luôn có 13 layer
-            input_data = { "embedding": (args.batch_size, PTM_NUM_LAYERS, PTM_DIM) }
+            dummy_inputs = { "embedding": torch.randn(args.batch_size, PTM_NUM_LAYERS, PTM_DIM).to(device) }
         else:
-            # Mode 2: Handcrafted chuỗi thời gian
-            input_data = { "feature": (args.batch_size, HANDCRAFTED_DIM, 200) }
+            dummy_inputs = { "feature": torch.randn(args.batch_size, actual_input_dim, 200).to(device) }
 
-        model_summary = summary(model, input_size=input_data, verbose=0, device=str(device))
+        # Truyền thẳng dummy_inputs dưới dạng **kwargs vào torchinfo
+        model_summary = summary(model, **dummy_inputs, verbose=0)
         
         with open(os.path.join(exp_dir, "model_summary.txt"), "w", encoding="utf-8") as f:
             f.write(str(model_summary))
@@ -468,7 +482,7 @@ def train(args):
 
     if args.optimizer.lower() == "adam":
         params = list(model.parameters()) + list(criterion.parameters())
-        opt = optim.Adam(
+        opt = optim.AdamW(
             params, lr=args.learning_rate, weight_decay=args.weight_decay
         )
     elif args.optimizer.lower() == "sgd":
@@ -492,7 +506,6 @@ def train(args):
             mode="min",
             factor=PLATEAU_FACTOR,
             patience=PLATEAU_PATIENCE,
-            verbose=True,
         )
     else:
         raise ValueError(f"Unknown scheduler: {args.lr_scheduler}")

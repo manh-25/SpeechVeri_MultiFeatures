@@ -1,0 +1,21 @@
+{
+  "exp_name": "Mode1_PTM_train_raw_wavlm",
+  "timestamp": "2026-03-01T17:41:21.964172",
+  "device": "cuda",
+  "duration": "train_raw",
+  "pretrained_model": "wavlm",
+  "mode": 1,
+  "fusion_method": "",
+  "feature_mode": "N/A",
+  "use_gating": false,
+  "learning_rate": 0.001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 100,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
