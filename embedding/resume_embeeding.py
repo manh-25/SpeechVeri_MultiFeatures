@@ -67,7 +67,7 @@ def run_extraction_resume(model_key, folder_path, save_dir, batch_size=16, shard
             model = model_class.from_pretrained(
                 repo, 
                 output_hidden_states=True,
-                torch_dtype=torch.float16, 
+                torch_dtype=torch.float32, 
                 attn_implementation="eager"
             ).to(device).eval()
 
@@ -89,7 +89,7 @@ def run_extraction_resume(model_key, folder_path, save_dir, batch_size=16, shard
             # Ý 2: CƠ CHẾ OOM RECOVERY
             try:
                 inputs = processor(waveforms_numpy, sampling_rate=16000, return_tensors="pt", padding=True).to(device)
-                inputs['input_values'] = inputs['input_values'].half()
+                # inputs['input_values'] = inputs['input_values'].half()
                 
                 outputs = model(**inputs, output_hidden_states=True)
                 stacked = torch.stack(outputs.hidden_states)
@@ -101,7 +101,7 @@ def run_extraction_resume(model_key, folder_path, save_dir, batch_size=16, shard
                 temp_pooled = []
                 for w in waveforms_numpy:
                     inp = processor([w], sampling_rate=16000, return_tensors="pt").to(device)
-                    inp['input_values'] = inp['input_values'].half()
+                    # inp['input_values'] = inp['input_values'].half()
                     with torch.no_grad():
                         out = model(**inp, output_hidden_states=True)
                         p = torch.stack(out.hidden_states).mean(dim=2).permute(1, 0, 2).cpu().float()

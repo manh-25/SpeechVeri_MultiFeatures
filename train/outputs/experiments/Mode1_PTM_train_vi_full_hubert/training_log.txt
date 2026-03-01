@@ -1,0 +1,40 @@
+Training started: 2026-03-01 18:19:16.315518
+{
+  "exp_name": "Mode1_PTM_train_vi_full_hubert",
+  "timestamp": "2026-03-01T18:19:07.176230",
+  "device": "cuda",
+  "duration": "train_vi_full",
+  "pretrained_model": "hubert",
+  "mode": 1,
+  "fusion_method": "",
+  "feature_mode": "N/A",
+  "use_gating": false,
+  "learning_rate": 0.001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 100,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 3.5368, Acc: 0.5546 | Val Loss: 2.0233, Acc: 0.6946 | LR: 0.001000
+Epoch   2 | Train Loss: 1.5453, Acc: 0.7473 | Val Loss: 1.4399, Acc: 0.7665 | LR: 0.001000
+Epoch   3 | Train Loss: 1.0776, Acc: 0.8093 | Val Loss: 1.2403, Acc: 0.7990 | LR: 0.001000
+Epoch   4 | Train Loss: 0.8199, Acc: 0.8482 | Val Loss: 1.1009, Acc: 0.8194 | LR: 0.001000
+Epoch   5 | Train Loss: 0.6392, Acc: 0.8762 | Val Loss: 1.0117, Acc: 0.8362 | LR: 0.001000
+Epoch   6 | Train Loss: 0.5041, Acc: 0.8997 | Val Loss: 0.9757, Acc: 0.8441 | LR: 0.001000
+Epoch   7 | Train Loss: 0.4027, Acc: 0.9172 | Val Loss: 0.9610, Acc: 0.8526 | LR: 0.001000
+Epoch   8 | Train Loss: 0.3203, Acc: 0.9322 | Val Loss: 0.9393, Acc: 0.8550 | LR: 0.001000
+Epoch   9 | Train Loss: 0.2595, Acc: 0.9440 | Val Loss: 0.9232, Acc: 0.8586 | LR: 0.001000
+Epoch  10 | Train Loss: 0.2125, Acc: 0.9540 | Val Loss: 0.9506, Acc: 0.8594 | LR: 0.001000
+Epoch  11 | Train Loss: 0.1767, Acc: 0.9616 | Val Loss: 0.9079, Acc: 0.8647 | LR: 0.001000
+Epoch  12 | Train Loss: 0.1524, Acc: 0.9674 | Val Loss: 0.9058, Acc: 0.8680 | LR: 0.001000
+Epoch  13 | Train Loss: 0.1369, Acc: 0.9711 | Val Loss: 0.9007, Acc: 0.8697 | LR: 0.001000
+Epoch  14 | Train Loss: 0.1253, Acc: 0.9741 | Val Loss: 0.8953, Acc: 0.8702 | LR: 0.001000
+Epoch  15 | Train Loss: 0.1147, Acc: 0.9763 | Val Loss: 0.9114, Acc: 0.8729 | LR: 0.001000
+Epoch  16 | Train Loss: 0.1105, Acc: 0.9772 | Val Loss: 0.9122, Acc: 0.8700 | LR: 0.001000
+Epoch  17 | Train Loss: 0.1018, Acc: 0.9791 | Val Loss: 0.8982, Acc: 0.8730 | LR: 0.001000

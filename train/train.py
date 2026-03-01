@@ -198,6 +198,13 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         labels = batch_data["label"].to(device)
         inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
+        if "embedding" in inputs and torch.isnan(inputs["embedding"]).any():
+            print(f"\n🚨 PHÁT HIỆN DỮ LIỆU PTM BỊ NaN Ở BATCH {batch_idx}! Đã bỏ qua batch này.")
+            continue
+        if "feature" in inputs and torch.isnan(inputs["feature"]).any():
+            print(f"\n🚨 PHÁT HIỆN FEATURE HC BỊ NaN Ở BATCH {batch_idx}! Đã bỏ qua batch này.")
+            continue
+        
         optimizer.zero_grad()
 
         # Forward pass with mixed precision
