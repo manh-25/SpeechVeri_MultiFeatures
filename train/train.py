@@ -471,7 +471,7 @@ def train(args):
 
     if args.optimizer.lower() == "adam":
         params = list(model.parameters()) + list(criterion.parameters())
-        opt = optim.Adam(
+        opt = optim.AdamW(
             params, lr=args.learning_rate, weight_decay=args.weight_decay
         )
     elif args.optimizer.lower() == "sgd":

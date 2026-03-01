@@ -177,11 +177,10 @@ def create_train_val_loaders(
 
     train_loader = DataLoader(
         Subset(full_dataset, indices[:train_end]),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        batch_size=batch_size, shuffle=True, num_workers=0,
         # Thay lambda bằng partial
         collate_fn=partial(collate_fn_general, mode=mode, is_train=True), 
-        pin_memory=False,
-        prefetch_factor=4
+        pin_memory=False
     )
     val_loader = DataLoader(
         Subset(full_dataset, indices[train_end:]),
