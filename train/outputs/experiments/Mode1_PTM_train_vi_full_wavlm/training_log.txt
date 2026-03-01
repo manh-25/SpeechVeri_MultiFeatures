@@ -1,7 +1,14 @@
+<<<<<<< HEAD
 Training started: 2026-03-01 18:27:00.119854
 {
   "exp_name": "Mode1_PTM_train_vi_full_wavlm",
   "timestamp": "2026-03-01T18:26:55.280259",
+=======
+Training started: 2026-03-01 18:23:47.308392
+{
+  "exp_name": "Mode1_PTM_train_vi_full_wavlm",
+  "timestamp": "2026-03-01T18:23:40.834464",
+>>>>>>> 9462d47d9ca57ef0d29e021ead0970ba2ec700e3
   "device": "cuda",
   "duration": "train_vi_full",
   "pretrained_model": "wavlm",
@@ -21,6 +28,7 @@ Training started: 2026-03-01 18:27:00.119854
   "aam_scale": 30
 }
 
+<<<<<<< HEAD
 Epoch   1 | Train Loss: 3.4148, Acc: 0.5667 | Val Loss: 1.9274, Acc: 0.6979 | LR: 0.001000
 Epoch   2 | Train Loss: 1.4379, Acc: 0.7612 | Val Loss: 1.3517, Acc: 0.7803 | LR: 0.001000
 Epoch   3 | Train Loss: 0.9879, Acc: 0.8228 | Val Loss: 1.1151, Acc: 0.8160 | LR: 0.001000
@@ -41,3 +49,5 @@ Epoch  17 | Train Loss: 0.1031, Acc: 0.9782 | Val Loss: 0.8465, Acc: 0.8824 | LR
 Epoch  18 | Train Loss: 0.0870, Acc: 0.9827 | Val Loss: 0.8288, Acc: 0.8848 | LR: 0.001000
 Epoch  19 | Train Loss: 0.0829, Acc: 0.9834 | Val Loss: 0.8498, Acc: 0.8801 | LR: 0.001000
 Early stopping triggered!
+=======
+>>>>>>> 9462d47d9ca57ef0d29e021ead0970ba2ec700e3

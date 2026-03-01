@@ -31,3 +31,5 @@ Epoch   7 | Train Loss: 6.2375, Acc: 0.2336 | Val Loss: 4.3219, Acc: 0.3501 | LR
 Epoch   8 | Train Loss: 6.1716, Acc: 0.2406 | Val Loss: 4.2661, Acc: 0.3604 | LR: 0.001000
 Epoch   9 | Train Loss: 6.1080, Acc: 0.2506 | Val Loss: 4.1759, Acc: 0.3700 | LR: 0.001000
 Epoch  10 | Train Loss: 6.0589, Acc: 0.2566 | Val Loss: 4.2335, Acc: 0.3670 | LR: 0.001000
+Epoch  11 | Train Loss: 6.0357, Acc: 0.2606 | Val Loss: 3.8267, Acc: 0.4021 | LR: 0.001000
+Epoch  12 | Train Loss: 5.9897, Acc: 0.2662 | Val Loss: 3.8999, Acc: 0.3916 | LR: 0.001000
