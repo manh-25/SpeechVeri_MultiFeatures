@@ -20,6 +20,7 @@ from config import (
     AAM_SCALE,
     MODE,
     FUSION_METHOD,
+    DIM_MAP,
 )
 
 
@@ -311,6 +312,8 @@ class SpeakerVerificationModel(nn.Module):
         self.use_gating = use_gating
         self.num_speakers = num_speakers
 
+        actual_input_dim = DIM_MAP.get(feature_mode, 81)
+
         # Mode 1: PTM only
         if mode == 1:
             self.ptm_encoder = PTMEncoder()
@@ -319,7 +322,7 @@ class SpeakerVerificationModel(nn.Module):
         # Mode 2: Handcrafted only
         elif mode == 2:
             self.handcrafted_encoder = HandcraftedEncoder(
-                input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode=feature_mode
+                input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
             self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
 
@@ -327,7 +330,7 @@ class SpeakerVerificationModel(nn.Module):
         elif mode == 3:
             self.ptm_encoder = PTMEncoder()
             self.handcrafted_encoder = HandcraftedEncoder(
-                input_dim=HANDCRAFTED_DIM, output_dim=PTM_DIM, feature_mode=feature_mode
+                input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
 
             if fusion_method == "concat":
