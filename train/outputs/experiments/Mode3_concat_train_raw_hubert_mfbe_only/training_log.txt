@@ -1,7 +1,7 @@
-Training started: 2026-03-02 15:00:53.656494
+Training started: 2026-03-02 18:08:59.876706
 {
   "exp_name": "Mode3_concat_train_raw_hubert_mfbe_only",
-  "timestamp": "2026-03-02T15:00:12.997231",
+  "timestamp": "2026-03-02T18:07:14.235635",
   "device": "cuda",
   "duration": "train_raw",
   "pretrained_model": "hubert",
@@ -21,5 +21,11 @@ Training started: 2026-03-02 15:00:53.656494
   "aam_scale": 30
 }
 
-Epoch   1 | Train Loss: 4.4397, Acc: 0.5007 | EER: 0.00%, MinDCF: 0.0000 | LR: 0.000100
-Epoch   2 | Train Loss: 2.1466, Acc: 0.6960 | EER: 0.00%, MinDCF: 0.0000 | LR: 0.000100
+Epoch   1 | Train Loss: 4.4346, Acc: 0.5013 | EER: 12.77%, MinDCF: 0.0320 | LR: 0.000100
+Epoch   2 | Train Loss: 2.1453, Acc: 0.6963 | EER: 11.16%, MinDCF: 0.0270 | LR: 0.000100
+Epoch   3 | Train Loss: 1.4967, Acc: 0.7677 | EER: 11.24%, MinDCF: 0.0255 | LR: 0.000100
+Epoch   4 | Train Loss: 1.1253, Acc: 0.8144 | EER: 11.81%, MinDCF: 0.0256 | LR: 0.000100
+Epoch   5 | Train Loss: 0.8711, Acc: 0.8495 | EER: 11.97%, MinDCF: 0.0252 | LR: 0.000100
+Epoch   6 | Train Loss: 0.6908, Acc: 0.8756 | EER: 11.20%, MinDCF: 0.0242 | LR: 0.000050
+Epoch   7 | Train Loss: 0.4281, Acc: 0.9195 | EER: 12.86%, MinDCF: 0.0249 | LR: 0.000050
+Early stopping triggered!

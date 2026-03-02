@@ -1,6 +1,6 @@
 {
   "exp_name": "Mode3_concat_train_raw_hubert_mfbe_only",
-  "timestamp": "2026-03-02T15:00:12.997231",
+  "timestamp": "2026-03-02T18:07:14.235635",
   "device": "cuda",
   "duration": "train_raw",
   "pretrained_model": "hubert",

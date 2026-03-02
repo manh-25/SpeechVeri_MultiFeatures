@@ -63,26 +63,6 @@ from model import SpeakerVerificationModel, AAMSoftmaxLoss, get_model
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def compute_eer(y_true, y_scores):
-    """
-    Compute Equal Error Rate (EER) - primary metric for speaker verification
-    EER is the threshold where FAR = FRR
-    """
-    fpr, fnr, thresholds = roc_curve(y_true, y_scores, pos_label=1)
-    eer_idx = np.argmin(np.abs(fpr - fnr))
-    eer = np.min(np.abs(fpr - fnr))
-    eer_threshold = thresholds[eer_idx]
-    return eer, eer_threshold
-
-
-def compute_mindcf(y_true, y_scores, p_target=0.01, c_miss=1, c_fa=1):
-    """
-    Compute Minimum Detection Cost Function (MinDCF)
-    Used in NIST speaker recognition evaluation
-    """
-    fpr, fnr, _ = roc_curve(y_true, y_scores, pos_label=1)
-    mindcf = np.min(c_miss * fnr * p_target + c_fa * fpr * (1 - p_target))
-    return mindcf
 
 
 def save_checkpoint(model, optimizer, epoch, best_loss, checkpoint_path):
@@ -368,7 +348,7 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
     
     # Plot gate distribution
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.hist(all_gates, bins=50, alpha=0.7, color='purple', edgecolor='black')
+    ax.hist(all_gates.flatten(), bins=50, alpha=0.7, color='purple', edgecolor='black')
     ax.axvline(x=0.5, color='red', linestyle='--', linewidth=2, label='Neutral (0.5)')
     ax.set_xlabel('Gate Value (PTM Weight)')
     ax.set_ylabel('Frequency')
@@ -384,8 +364,9 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
     ptm_priority = np.sum(all_gates > 0.5)
     hc_priority = np.sum(all_gates <= 0.5)
     
-    print(f"  PTM Priority (g > 0.5): {ptm_priority} / {len(all_gates)} ({100*ptm_priority/len(all_gates):.1f}%)")
-    print(f"  HC Priority (g <= 0.5): {hc_priority} / {len(all_gates)} ({100*hc_priority/len(all_gates):.1f}%)")
+    total_elements = all_gates.size
+    print(f"  PTM Priority (g > 0.5): {ptm_priority} / {total_elements} ({100*ptm_priority/total_elements:.1f}%)")
+    print(f"  HC Priority (g <= 0.5): {hc_priority} / {total_elements} ({100*hc_priority/total_elements:.1f}%)")
     
     return all_gates, all_labels
 
@@ -639,29 +620,6 @@ def train(args):
     # Load best model
     model, _, _, _ = load_checkpoint(os.path.join(exp_dir, BEST_MODEL_NAME), model)
 
-    # VẼ CONFUSION MATRIX CHO TẬP VAL
-    print("\nGenerating final Confusion Matrix on Validation Set...")
-    model.eval()
-    all_preds, all_trues = [], []
-    with torch.no_grad():
-        for batch_data in tqdm(val_loader, desc="Testing for CM", leave=False):
-            labels = batch_data["label"].to(device)
-            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
-            _, embeddings = model(**inputs)
-            _, logits = criterion(None, labels, embeddings=embeddings)
-            
-            all_preds.extend(torch.argmax(logits, dim=1).cpu().numpy())
-            all_trues.extend(labels.cpu().numpy())
-
-    cm = confusion_matrix(all_trues, all_preds)
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sns.heatmap(cm, annot=False, fmt='d', cmap='Blues', ax=ax) # Tắt annot cho đỡ rối chữ
-    ax.set_title(f'Final Confusion Matrix (Validation Set)')
-    
-    os.makedirs(os.path.join(exp_dir, "confusion_matrices"), exist_ok=True)
-    fig.savefig(os.path.join(exp_dir, "confusion_matrices", "final_val_cm.png"), dpi=150)
-    writer.add_figure("Evaluation/Confusion_Matrix_Val", fig, global_step=epoch)
-
     # Phân tích Gating trên tập VAL
     if args.mode == 3 and args.fusion_method == "gating":
         gates, labels = analyze_gating_behavior(model, val_loader, device, exp_dir)
@@ -673,9 +631,10 @@ def train(args):
         "exp_name": args.exp_name,
         "timestamp": datetime.now().isoformat(),
         "config": config_snapshot,
-        "best_val_eer": float(best_val_eer), # Lưu EER tốt nhất thay vì Loss
+        "best_val_eer": float(best_val_eer), 
+        "best_val_mindcf": float(training_history["val_mindcf"][training_history["val_eer"].index(best_val_eer)]),
         "final_train_loss": float(training_history["train_loss"][-1]),
-        "final_val_loss": float(training_history["val_loss"][-1]),
+        "final_train_accuracy": float(training_history["train_accuracy"][-1]),
         "epochs_trained": epoch + 1,
     }
 

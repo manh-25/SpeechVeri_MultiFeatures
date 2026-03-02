@@ -1,9 +1,9 @@
 {
   "exp_name": "Mode1_PTM_train_vi_full_hubert",
-  "timestamp": "2026-03-01T18:23:39.754096",
+  "timestamp": "2026-03-02T17:51:36.555873",
   "config": {
     "exp_name": "Mode1_PTM_train_vi_full_hubert",
-    "timestamp": "2026-03-01T18:19:07.176230",
+    "timestamp": "2026-03-02T17:47:41.050135",
     "device": "cuda",
     "duration": "train_vi_full",
     "pretrained_model": "hubert",
@@ -11,19 +11,20 @@
     "fusion_method": "",
     "feature_mode": "N/A",
     "use_gating": false,
-    "learning_rate": 0.001,
+    "learning_rate": 0.0001,
     "optimizer": "adam",
     "batch_size": 256,
-    "num_epochs": 100,
+    "num_epochs": 50,
     "weight_decay": 0.001,
     "mixed_precision": true,
-    "early_stop_patience": 5,
+    "early_stop_patience": 7,
     "lr_scheduler": "plateau",
     "aam_margin": 0.2,
     "aam_scale": 30
   },
-  "best_val_loss": 0.8953091604088743,
-  "final_train_loss": 0.09507225012380999,
-  "final_val_loss": 0.9176383542170127,
-  "epochs_trained": 19
+  "best_val_eer": 15.924999999951343,
+  "best_val_mindcf": 0.039745,
+  "final_train_loss": 0.21487970101945805,
+  "final_train_accuracy": 0.9619545990566037,
+  "epochs_trained": 8
 }

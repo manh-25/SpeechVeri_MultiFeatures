@@ -1,9 +1,9 @@
 {
   "exp_name": "Mode1_PTM_train_raw_wavlm",
-  "timestamp": "2026-03-01T17:46:53.638488",
+  "timestamp": "2026-03-02T17:47:40.780316",
   "config": {
     "exp_name": "Mode1_PTM_train_raw_wavlm",
-    "timestamp": "2026-03-01T17:41:21.964172",
+    "timestamp": "2026-03-02T17:45:01.676149",
     "device": "cuda",
     "duration": "train_raw",
     "pretrained_model": "wavlm",
@@ -11,19 +11,20 @@
     "fusion_method": "",
     "feature_mode": "N/A",
     "use_gating": false,
-    "learning_rate": 0.001,
+    "learning_rate": 0.0001,
     "optimizer": "adam",
     "batch_size": 256,
-    "num_epochs": 100,
+    "num_epochs": 50,
     "weight_decay": 0.001,
     "mixed_precision": true,
-    "early_stop_patience": 5,
+    "early_stop_patience": 7,
     "lr_scheduler": "plateau",
     "aam_margin": 0.2,
     "aam_scale": 30
   },
-  "best_val_loss": 0.839224093743406,
-  "final_train_loss": 0.08025143841294559,
-  "final_val_loss": 0.8411806728634926,
-  "epochs_trained": 22
+  "best_val_eer": 10.590000000000204,
+  "best_val_mindcf": 0.025724999999999998,
+  "final_train_loss": 0.10582088545705733,
+  "final_train_accuracy": 0.9838898702879637,
+  "epochs_trained": 10
 }

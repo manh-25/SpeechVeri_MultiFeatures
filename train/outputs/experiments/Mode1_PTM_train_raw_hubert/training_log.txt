@@ -1,7 +1,7 @@
-Training started: 2026-03-01 16:47:34.352655
+Training started: 2026-03-02 17:42:25.629299
 {
   "exp_name": "Mode1_PTM_train_raw_hubert",
-  "timestamp": "2026-03-01T16:47:29.549735",
+  "timestamp": "2026-03-02T17:42:19.637630",
   "device": "cuda",
   "duration": "train_raw",
   "pretrained_model": "hubert",
@@ -9,32 +9,26 @@ Training started: 2026-03-01 16:47:34.352655
   "fusion_method": "",
   "feature_mode": "N/A",
   "use_gating": false,
-  "learning_rate": 0.001,
+  "learning_rate": 0.0001,
   "optimizer": "adam",
   "batch_size": 256,
-  "num_epochs": 100,
+  "num_epochs": 50,
   "weight_decay": 0.001,
   "mixed_precision": true,
-  "early_stop_patience": 5,
+  "early_stop_patience": 7,
   "lr_scheduler": "plateau",
   "aam_margin": 0.2,
   "aam_scale": 30
 }
 
-Epoch   1 | Train Loss: 3.5173, Acc: 0.5597 | Val Loss: 2.0147, Acc: 0.7013 | LR: 0.001000
-Epoch   2 | Train Loss: 1.5653, Acc: 0.7476 | Val Loss: 1.5074, Acc: 0.7651 | LR: 0.001000
-Epoch   3 | Train Loss: 1.1093, Acc: 0.8088 | Val Loss: 1.2643, Acc: 0.7979 | LR: 0.001000
-Epoch   4 | Train Loss: 0.8551, Acc: 0.8459 | Val Loss: 1.1424, Acc: 0.8176 | LR: 0.001000
-Epoch   5 | Train Loss: 0.6792, Acc: 0.8734 | Val Loss: 1.0733, Acc: 0.8315 | LR: 0.001000
-Epoch   6 | Train Loss: 0.5422, Acc: 0.8953 | Val Loss: 1.0055, Acc: 0.8421 | LR: 0.001000
-Epoch   7 | Train Loss: 0.4365, Acc: 0.9132 | Val Loss: 0.9708, Acc: 0.8511 | LR: 0.001000
-Epoch   8 | Train Loss: 0.3546, Acc: 0.9282 | Val Loss: 0.9633, Acc: 0.8565 | LR: 0.001000
-Epoch   9 | Train Loss: 0.2819, Acc: 0.9417 | Val Loss: 0.9656, Acc: 0.8581 | LR: 0.001000
-Epoch  10 | Train Loss: 0.2289, Acc: 0.9514 | Val Loss: 0.9533, Acc: 0.8631 | LR: 0.001000
-Epoch  11 | Train Loss: 0.1859, Acc: 0.9601 | Val Loss: 0.9413, Acc: 0.8643 | LR: 0.001000
-Epoch  12 | Train Loss: 0.1651, Acc: 0.9646 | Val Loss: 0.9492, Acc: 0.8642 | LR: 0.001000
-Epoch  13 | Train Loss: 0.1430, Acc: 0.9698 | Val Loss: 0.9539, Acc: 0.8674 | LR: 0.001000
-Epoch  14 | Train Loss: 0.1337, Acc: 0.9719 | Val Loss: 0.9675, Acc: 0.8633 | LR: 0.001000
-Epoch  15 | Train Loss: 0.1204, Acc: 0.9753 | Val Loss: 0.9488, Acc: 0.8683 | LR: 0.001000
-Epoch  16 | Train Loss: 0.1132, Acc: 0.9769 | Val Loss: 0.9619, Acc: 0.8689 | LR: 0.001000
+Epoch   1 | Train Loss: 4.3875, Acc: 0.5022 | EER: 11.13%, MinDCF: 0.0325 | LR: 0.000100
+Epoch   2 | Train Loss: 2.0195, Acc: 0.7098 | EER: 11.07%, MinDCF: 0.0292 | LR: 0.000100
+Epoch   3 | Train Loss: 1.3263, Acc: 0.7877 | EER: 10.35%, MinDCF: 0.0257 | LR: 0.000100
+Epoch   4 | Train Loss: 0.9397, Acc: 0.8384 | EER: 12.00%, MinDCF: 0.0261 | LR: 0.000100
+Epoch   5 | Train Loss: 0.6946, Acc: 0.8733 | EER: 11.01%, MinDCF: 0.0248 | LR: 0.000100
+Epoch   6 | Train Loss: 0.5229, Acc: 0.9008 | EER: 13.19%, MinDCF: 0.0254 | LR: 0.000100
+Epoch   7 | Train Loss: 0.3999, Acc: 0.9224 | EER: 12.67%, MinDCF: 0.0251 | LR: 0.000050
+Epoch   8 | Train Loss: 0.2141, Acc: 0.9600 | EER: 13.83%, MinDCF: 0.0257 | LR: 0.000050
+Epoch   9 | Train Loss: 0.1570, Acc: 0.9730 | EER: 13.15%, MinDCF: 0.0250 | LR: 0.000050
+Epoch  10 | Train Loss: 0.1247, Acc: 0.9803 | EER: 14.01%, MinDCF: 0.0254 | LR: 0.000050
 Early stopping triggered!

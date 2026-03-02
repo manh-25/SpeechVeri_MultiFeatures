@@ -55,7 +55,7 @@ EMBEDDING_DIM = 512
 BATCH_SIZE = 64
 NUM_EPOCHS = 100
 LEARNING_RATE = 0.001
-MIN_LEARNING_RATE = 0.00001
+MIN_LEARNING_RATE = 0.00000001
 WEIGHT_DECAY = 0.0001
 
 # Early stopping
@@ -65,7 +65,7 @@ EARLY_STOP_DELTA = 1e-4  # Minimum change to qualify as improvement
 # Learning rate scheduler
 LR_SCHEDULER = "plateau"  # "cosine" or "plateau"
 COSINE_T_MAX = 50
-PLATEAU_PATIENCE = 5
+PLATEAU_PATIENCE = 3
 PLATEAU_FACTOR = 0.5
 
 # ============================================================================

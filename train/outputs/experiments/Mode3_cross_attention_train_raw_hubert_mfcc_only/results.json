@@ -1,0 +1,30 @@
+{
+  "exp_name": "Mode3_cross_attention_train_raw_hubert_mfcc_only",
+  "timestamp": "2026-03-02T21:25:12.718198",
+  "config": {
+    "exp_name": "Mode3_cross_attention_train_raw_hubert_mfcc_only",
+    "timestamp": "2026-03-02T21:02:49.098877",
+    "device": "cuda",
+    "duration": "train_raw",
+    "pretrained_model": "hubert",
+    "mode": 3,
+    "fusion_method": "cross_attention",
+    "feature_mode": "mfcc_only",
+    "use_gating": false,
+    "learning_rate": 0.0001,
+    "optimizer": "adam",
+    "batch_size": 256,
+    "num_epochs": 50,
+    "weight_decay": 0.001,
+    "mixed_precision": true,
+    "early_stop_patience": 5,
+    "lr_scheduler": "plateau",
+    "aam_margin": 0.2,
+    "aam_scale": 30
+  },
+  "best_val_eer": 11.444999999911078,
+  "best_val_mindcf": 0.024487500000000002,
+  "final_train_loss": 0.1230199851486729,
+  "final_train_accuracy": 0.9756315133189628,
+  "epochs_trained": 14
+}
