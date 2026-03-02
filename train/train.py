@@ -455,28 +455,17 @@ def train(args):
     # Save model summary
     print("\nGenerating model summary...")
     try:
-<<<<<<< HEAD
         actual_input_dim = DIM_MAP.get(args.feature_mode, 81)
-=======
->>>>>>> 9462d47d9ca57ef0d29e021ead0970ba2ec700e3
         # Tạo dummy tensors theo mode thay vì dict shape
         if args.mode == 3:
             dummy_inputs = { 
                 "embedding": torch.randn(args.batch_size, PTM_NUM_LAYERS, PTM_DIM).to(device), 
-<<<<<<< HEAD
                 "feature": torch.randn(args.batch_size, actual_input_dim, 200).to(device) 
-=======
-                "feature": torch.randn(args.batch_size, HANDCRAFTED_DIM, 200).to(device) 
->>>>>>> 9462d47d9ca57ef0d29e021ead0970ba2ec700e3
             }
         elif args.mode == 1:
             dummy_inputs = { "embedding": torch.randn(args.batch_size, PTM_NUM_LAYERS, PTM_DIM).to(device) }
         else:
-<<<<<<< HEAD
             dummy_inputs = { "feature": torch.randn(args.batch_size, actual_input_dim, 200).to(device) }
-=======
-            dummy_inputs = { "feature": torch.randn(args.batch_size, HANDCRAFTED_DIM, 200).to(device) }
->>>>>>> 9462d47d9ca57ef0d29e021ead0970ba2ec700e3
 
         # Truyền thẳng dummy_inputs dưới dạng **kwargs vào torchinfo
         model_summary = summary(model, **dummy_inputs, verbose=0)

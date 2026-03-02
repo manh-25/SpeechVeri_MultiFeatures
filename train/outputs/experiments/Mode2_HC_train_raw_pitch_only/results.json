@@ -1,0 +1,29 @@
+{
+  "exp_name": "Mode2_HC_train_raw_pitch_only",
+  "timestamp": "2026-03-01T21:06:19.637310",
+  "config": {
+    "exp_name": "Mode2_HC_train_raw_pitch_only",
+    "timestamp": "2026-03-01T20:45:02.978839",
+    "device": "cuda",
+    "duration": "train_raw",
+    "pretrained_model": "N/A",
+    "mode": 2,
+    "fusion_method": "",
+    "feature_mode": "pitch_only",
+    "use_gating": false,
+    "learning_rate": 0.001,
+    "optimizer": "adam",
+    "batch_size": 256,
+    "num_epochs": 100,
+    "weight_decay": 0.001,
+    "mixed_precision": true,
+    "early_stop_patience": 5,
+    "lr_scheduler": "plateau",
+    "aam_margin": 0.2,
+    "aam_scale": 30
+  },
+  "best_val_loss": 8.343849178191357,
+  "final_train_loss": 7.784717493123941,
+  "final_val_loss": 8.486744297525295,
+  "epochs_trained": 17
+}

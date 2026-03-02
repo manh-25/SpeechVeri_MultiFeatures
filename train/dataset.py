@@ -68,17 +68,25 @@ def collate_fn_general(batch, mode, is_train=True, max_frames=200):
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
     output = {"label": labels}
 
-    if mode in [1, 3]:
+    if mode in [1,3]:
         output["embedding"] = torch.stack([item["embedding"] for item in batch])
 
     # Gom Handcrafted Features (Dynamic Padding chiều T bằng Replicate)
-    if mode in [2, 3]:
+    if mode in [2,3]:
         features = [item["feature"] for item in batch]
         processed_features = []
         
+        # 1. BƯỚC LỌC CHUẨN: Ép tất cả feature về 2D [C, T] ngay từ đầu
+        safe_features = []
+        for f in features:
+            if f.dim() == 1:
+                f = f.unsqueeze(0)  # [T] thành [1, T] (VD: pitch)
+            safe_features.append(f)
+            
+        # 2. XỬ LÝ THEO TRAIN/VAL
         if is_train:
-            # TỐI ƯU TỐC ĐỘ: Cắt ngẫu nhiên 200 frames lúc Train (Cực kỳ nhanh + Tăng Data Augmentation)
-            for f in features:
+            # TỐI ƯU TỐC ĐỘ: Cắt ngẫu nhiên max_frames lúc Train
+            for f in safe_features:
                 c, t = f.shape
                 if t > max_frames:
                     start = random.randint(0, t - max_frames)
@@ -88,11 +96,11 @@ def collate_fn_general(batch, mode, is_train=True, max_frames=200):
                     f = F.pad(f.unsqueeze(0), (0, pad_len), mode='replicate').squeeze(0)
                 processed_features.append(f)
         else:
-            # Lúc Val/Test: Giữ nguyên độ dài, nhưng CẮT BỎ phần thừa nếu dài quá 10 giây
-            max_t = max([f.shape[-1] for f in features])
+            # Lúc Val/Test: Giữ nguyên độ dài, nhưng CẮT BỎ phần thừa nếu quá dài
+            max_t = max([f.shape[-1] for f in safe_features])
             max_t = min(max_t, 1000) # <-- SAFETY CAP CHỐNG TRÀN VRAM
             
-            for f in features:
+            for f in safe_features:
                 if f.shape[-1] > max_t:
                     f = f[:, :max_t] # Cắt cụt nếu dài hơn max_t
                 
