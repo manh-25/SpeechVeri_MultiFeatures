@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torch.backends.cudnn as cudnn
 import numpy as np
 import os
@@ -22,7 +22,8 @@ import seaborn as sns
 from sklearn.metrics import roc_curve, auc, confusion_matrix
 from torch.utils.tensorboard import SummaryWriter
 from dataset import create_train_val_loaders
-
+import torch.nn.functional as F
+from metrics import compute_eer, compute_mindcf
 
 from config import (
     BATCH_SIZE,
@@ -210,7 +211,7 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
 
         # Forward pass with mixed precision
         if MIXED_PRECISION:
-            with autocast():
+            with autocast('cuda'):
                 _, embeddings = model(**inputs)
             loss, logits = criterion(None, labels, embeddings=embeddings.float())
         else:
@@ -252,48 +253,85 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
     return avg_loss, avg_accuracy
 
 
-def validate(model, val_loader, criterion, device):
+def validate(model, val_loader, device):
     """
-    Validate model.
-
-    Args:
-        model: nn.Module
-        val_loader: DataLoader
-        criterion: Loss function
-        device: Device to validate on
-
-    Returns:
-        avg_loss: Average validation loss
-        avg_accuracy: Average validation accuracy
+    Validate Open-set: Chỉ trích xuất embedding và đo EER/MinDCF.
+    Không tính Loss và Accuracy vì tập Val chứa Unseen Speakers.
     """
     model.eval()
-    total_loss = 0.0
-    total_accuracy = 0.0
-    num_batches = 0
+    all_embeddings_list = []
+    all_labels_list = []
 
     with torch.no_grad():
-        progress_bar = tqdm(val_loader, desc="Validation", leave=False)
+        progress_bar = tqdm(val_loader, desc="Validation (EER)", leave=False)
         for batch_data in progress_bar:
-            # Move data to device
             labels = batch_data["label"].to(device)
             inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
 
-            # Forward pass
-            _, embeddings = model(**inputs)
-            loss, logits = criterion(None, labels, embeddings=embeddings)
+            # Chỉ cần lấy embedding, bỏ qua logits
+            _, embeddings = model(**inputs) 
+            
+            all_embeddings_list.append(embeddings.cpu())
+            all_labels_list.append(labels.cpu())
+    
+    # ---------------------------------------------------------
+    # TÍNH TOÁN EER & MinDCF (TỐI ƯU HÓA LẤY MẪU CÂN BẰNG)
+    # ---------------------------------------------------------
+    all_embeddings = torch.cat(all_embeddings_list, dim=0)
+    all_embeddings = F.normalize(all_embeddings, p=2, dim=1).cpu().numpy()
+    all_labels = torch.cat(all_labels_list, dim=0).cpu().numpy()
 
-            # Metrics
-            accuracy = compute_metrics(logits, labels)
-            total_loss += loss.item()
-            total_accuracy += accuracy
-            num_batches += 1
+    # 1. Phân nhóm index theo từng speaker
+    import random
+    from collections import defaultdict
+    speaker_indices = defaultdict(list)
+    for idx, label in enumerate(all_labels):
+        speaker_indices[label].append(idx)
 
-            progress_bar.set_postfix({"loss": f"{total_loss / num_batches:.4f}"})
+    pos_pairs = []
+    # 2. Tạo Positive Pairs (Cùng speaker)
+    for label, indices in speaker_indices.items():
+        n = len(indices)
+        if n > 1:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pos_pairs.append((indices[i], indices[j]))
 
-    avg_loss = total_loss / num_batches
-    avg_accuracy = total_accuracy / num_batches
+    random.shuffle(pos_pairs)
+    pos_pairs = pos_pairs[:20000] # Giới hạn 20k cặp positive để chạy nhanh
 
-    return avg_loss, avg_accuracy
+    neg_pairs = []
+    # 3. Tạo Negative Pairs (Khác speaker) có số lượng tương đương Positive
+    labels_unique = list(speaker_indices.keys())
+    while len(neg_pairs) < len(pos_pairs):
+        spk1, spk2 = random.sample(labels_unique, 2)
+        idx1 = random.choice(speaker_indices[spk1])
+        idx2 = random.choice(speaker_indices[spk2])
+        neg_pairs.append((idx1, idx2))
+
+    # 4. Tính Cosine Similarity (Dot product của 2 vector đã normalize)
+    scores = []
+    y_true = []
+
+    for idx1, idx2 in pos_pairs:
+        scores.append(np.dot(all_embeddings[idx1], all_embeddings[idx2]))
+        y_true.append(1)
+
+    for idx1, idx2 in neg_pairs:
+        scores.append(np.dot(all_embeddings[idx1], all_embeddings[idx2]))
+        y_true.append(0)
+
+    scores = np.array(scores)
+    y_true = np.array(y_true)
+
+    # 5. Lấy kết quả trả về an toàn
+    eer_out = compute_eer(y_true, scores)
+    mindcf_out = compute_mindcf(y_true, scores, p_target=0.05)
+
+    eer = eer_out[0] if isinstance(eer_out, tuple) else eer_out
+    mindcf = mindcf_out[0] if isinstance(mindcf_out, tuple) else mindcf_out
+
+    return float(eer * 100), float(mindcf)
 
 
 # ============================================================================
@@ -436,7 +474,7 @@ def train(args):
     # Create dataloaders
     print("Loading Train/Val data...")
     train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
-        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=4
+        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
@@ -511,7 +549,7 @@ def train(args):
         raise ValueError(f"Unknown scheduler: {args.lr_scheduler}")
 
     # Mixed precision
-    scaler = GradScaler() if args.mixed_precision else None
+    scaler = GradScaler('cuda') if args.mixed_precision else None
 
     # Early stopping
     early_stopping = EarlyStopping(patience=args.early_stop_patience, delta=EARLY_STOP_DELTA)
@@ -523,12 +561,12 @@ def train(args):
         f.write(json.dumps(config_snapshot, indent=2) + "\n\n")
 
     # Training loop
-    best_val_loss = float("inf")
+    best_val_eer = float("inf") 
+    
     training_history = {
-        "train_loss": [],
-        "train_accuracy": [],
-        "val_loss": [],
-        "val_accuracy": [],
+        "train_loss": [], "train_accuracy": [],
+        "val_loss": [], "val_accuracy": [],
+        "val_eer": [], "val_mindcf": [] # Thêm 2 field mới
     }
 
     print("Starting training...\n")
@@ -538,49 +576,50 @@ def train(args):
             model, train_loader, opt, criterion, scaler, epoch, device
         )
 
-        # Validate
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        # Validate (Nhận thêm eer và mindcf)
+        val_eer, val_mindcf = validate(model, val_loader, device)
 
         # Update scheduler
         if args.lr_scheduler.lower() == "cosine":
             scheduler.step()
         elif args.lr_scheduler.lower() == "plateau":
-            scheduler.step(val_loss)
+            # Scheduler Plateau cũng nên ưu tiên dựa trên EER thay vì Loss
+            scheduler.step(val_eer)
 
         # Update history
         training_history["train_loss"].append(train_loss)
         training_history["train_accuracy"].append(train_acc)
-        training_history["val_loss"].append(val_loss)
-        training_history["val_accuracy"].append(val_acc)
+        training_history["val_eer"].append(val_eer)
+        training_history["val_mindcf"].append(val_mindcf)
 
         # Ghi log vào TensorBoard
         writer.add_scalar("Loss/Train", train_loss, epoch)
-        writer.add_scalar("Loss/Validation", val_loss, epoch)
         writer.add_scalar("Accuracy/Train", train_acc, epoch)
-        writer.add_scalar("Accuracy/Validation", val_acc, epoch)
+        writer.add_scalar("Metrics/EER_Validation", val_eer, epoch)       # ĐỒ THỊ MỚI
+        writer.add_scalar("Metrics/MinDCF_Validation", val_mindcf, epoch) # ĐỒ THỊ MỚI
         writer.add_scalar("LearningRate", opt.param_groups[0]['lr'], epoch)
 
         # Logging
         log_msg = (
             f"Epoch {epoch + 1:3d} | "
             f"Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f} | "
-            f"Val Loss: {val_loss:.4f}, Acc: {val_acc:.4f} | "
+            f"EER: {val_eer:.2f}%, MinDCF: {val_mindcf:.4f} | "
             f"LR: {opt.param_groups[0]['lr']:.6f}"
         )
         print(log_msg)
         with open(log_file, "a") as f:
             f.write(log_msg + "\n")
 
-        # Save checkpoint
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # ĐIỂM CỐT LÕI: Save checkpoint dựa trên EER thay vì Loss
+        if val_eer < best_val_eer:
+            best_val_eer = val_eer
             checkpoint_path = os.path.join(CHECKPOINT_DIR, BEST_MODEL_NAME)
-            save_checkpoint(model, opt, epoch, best_val_loss, checkpoint_path)
-            # Copy to exp folder
+            # Tái sử dụng hàm save (vẫn lưu best_val_eer vào field best_loss cho tương thích)
+            save_checkpoint(model, opt, epoch, best_val_eer, checkpoint_path)
             shutil.copy(checkpoint_path, os.path.join(exp_dir, BEST_MODEL_NAME))
 
-        # Early stopping
-        early_stopping(val_loss)
+        # Early stopping (bây giờ sẽ ngừng train nếu EER không giảm)
+        early_stopping(val_eer)
         if early_stopping.early_stop:
             print("\n✓ Early stopping triggered!")
             with open(log_file, "a") as f:
@@ -589,7 +628,7 @@ def train(args):
 
     # Save final model
     final_path = os.path.join(CHECKPOINT_DIR, FINAL_MODEL_NAME)
-    save_checkpoint(model, opt, epoch, best_val_loss, final_path)
+    save_checkpoint(model, opt, epoch, best_val_eer, final_path)
     shutil.copy(final_path, os.path.join(exp_dir, FINAL_MODEL_NAME))
 
     # Save history
@@ -634,7 +673,7 @@ def train(args):
         "exp_name": args.exp_name,
         "timestamp": datetime.now().isoformat(),
         "config": config_snapshot,
-        "best_val_loss": float(best_val_loss),
+        "best_val_eer": float(best_val_eer), # Lưu EER tốt nhất thay vì Loss
         "final_train_loss": float(training_history["train_loss"][-1]),
         "final_val_loss": float(training_history["val_loss"][-1]),
         "epochs_trained": epoch + 1,
@@ -651,7 +690,7 @@ def train(args):
         json.dump(final_results, f, indent=2)
 
     print(f"\n✓ Training completed!")
-    print(f"  Best validation loss: {best_val_loss:.4f}")
+    print(f"  Best validation EER: {best_val_eer:.4f}")
     print(f"  Experiment dir: {exp_dir}")
     print(f"  Config: {os.path.join(exp_dir, 'config.json')}")
     print(f"  Results: {os.path.join(exp_dir, 'results.json')}")

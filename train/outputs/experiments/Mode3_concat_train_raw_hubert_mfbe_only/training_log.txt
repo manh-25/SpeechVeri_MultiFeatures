@@ -1,3 +1,4 @@
+Training started: 2026-03-02 15:00:53.656494
 {
   "exp_name": "Mode3_concat_train_raw_hubert_mfbe_only",
   "timestamp": "2026-03-02T15:00:12.997231",
@@ -19,3 +20,6 @@
   "aam_margin": 0.2,
   "aam_scale": 30
 }
+
+Epoch   1 | Train Loss: 4.4397, Acc: 0.5007 | EER: 0.00%, MinDCF: 0.0000 | LR: 0.000100
+Epoch   2 | Train Loss: 2.1466, Acc: 0.6960 | EER: 0.00%, MinDCF: 0.0000 | LR: 0.000100

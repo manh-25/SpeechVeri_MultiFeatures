@@ -123,16 +123,17 @@ class ConcatenationFusion(nn.Module):
 
 
 class CrossAttentionFusion(nn.Module):
-    """Cross-modal attention fusion (PTM static query -> Handcrafted temporal)"""
+    """Cross-modal attention fusion (Handcrafted temporal query -> PTM static context)"""
     def __init__(self, dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM, num_heads=8):
         super().__init__()
         assert output_dim % num_heads == 0, "output_dim must be divisible by num_heads"
         self.num_heads = num_heads
         self.mha = nn.MultiheadAttention(embed_dim=output_dim, num_heads=num_heads, batch_first=True)
 
-        self.q_proj = nn.Conv1d(dim1, output_dim, kernel_size=1)
-        self.k_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
-        self.v_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
+        # dim1 là PTM (static), dim2 là HC (temporal)
+        self.q_proj = nn.Conv1d(dim2, output_dim, kernel_size=1) # HC làm Query
+        self.k_proj = nn.Conv1d(dim1, output_dim, kernel_size=1) # PTM làm Key
+        self.v_proj = nn.Conv1d(dim1, output_dim, kernel_size=1) # PTM làm Value
         self.out_proj = nn.Conv1d(output_dim, output_dim, kernel_size=1)
 
     def forward(self, ptm_static, hc_temporal):
@@ -140,19 +141,18 @@ class CrossAttentionFusion(nn.Module):
         if ptm_static.dim() == 2:
             ptm_static = ptm_static.unsqueeze(-1)
             
-        # Q: (B, 1, D) | K, V: (B, T, D)
-        Q = self.q_proj(ptm_static).transpose(1, 2) 
-        K = self.k_proj(hc_temporal).transpose(1, 2)
-        V = self.v_proj(hc_temporal).transpose(1, 2)
+        # Q lấy từ HC (B, T, D) | K, V lấy từ PTM (B, 1, D)
+        Q = self.q_proj(hc_temporal).transpose(1, 2) 
+        K = self.k_proj(ptm_static).transpose(1, 2)
+        V = self.v_proj(ptm_static).transpose(1, 2)
 
+        # Output sẽ tự động có shape (B, T, D)
         attn_output, _ = self.mha(query=Q, key=K, value=V)
 
-        # Transpose về (B, D, 1) và chiếu lại
+        # Transpose về lại (B, D, T) cho Convolution/ECAPA
         output = self.out_proj(attn_output.transpose(1, 2))
         
-        # Trả về ma trận có chiều T bằng với Handcrafted để lọt qua ECAPA-TDNN
-        T = hc_temporal.size(-1)
-        return output.expand(-1, -1, T)
+        return output
 
 # ============================================================================
 # SQUEEZE-AND-EXCITATION & ASP POOLING

@@ -136,7 +136,7 @@ def load_data(embedding_path, feature_dir=None, mode=1):
                 
             # Gộp tất cả tensor embedding lại theo chiều dọc (chiều Batch - dim 0)
             embedding_data["embeddings"] = torch.cat(all_embeddings, dim=0)
-            embedding_data["embeddings"].share_memory_()
+            # embedding_data["embeddings"].share_memory_()
             print(f"✅ Đã load gộp {len(shard_files)} file shards. Tổng số sample PTM: {len(embedding_data['speaker_ids'])}")
         else:
             # Fallback nếu truyền vào đường dẫn của 1 file duy nhất
@@ -169,34 +169,60 @@ def load_data(embedding_path, feature_dir=None, mode=1):
     return embedding_data, feature_data, speaker_to_idx
 
 
-def create_train_val_loaders(
-    embedding_path, feature_path=None, mode=1, batch_size=64, num_workers=0
-):
-    """CHỈ DÙNG CHO LÚC TRAIN: Nhận data, trộn lên và chia 85-15 thành Train và Val"""
+def create_train_val_loaders(embedding_path, feature_path, mode, batch_size, num_workers=0):
+    # Nạp dữ liệu
     embedding_data, feature_data, speaker_to_idx = load_data(embedding_path, feature_path, mode)
-    num_samples = len(embedding_data["speaker_ids"])
+    
+    # --- LỌC INDEX THEO SPEAKER ID (TRÁNH DATA LEAKAGE) ---
+    speaker_ids = embedding_data["speaker_ids"]
+    unique_speakers = sorted(set(speaker_ids))
+    
+    # Xáo trộn danh sách người nói (cố định seed để dễ tái lập)
+    import random
+    random.seed(42)
+    shuffled_speakers = list(unique_speakers)
+    random.shuffle(shuffled_speakers)
+    
+    # Cắt 85% NGƯỜI NÓI cho Train, 15% NGƯỜI NÓI cho Val
+    num_train_spk = int(len(shuffled_speakers) * TRAIN_RATIO)
+    train_speakers = set(shuffled_speakers[:num_train_spk])
+    val_speakers = set(shuffled_speakers[num_train_spk:])
+    
+    train_indices = []
+    val_indices = []
+    
+    # Phân loại từng mẫu âm thanh về đúng tập dựa trên speaker
+    for i, spk in enumerate(speaker_ids):
+        if spk in train_speakers:
+            train_indices.append(i)
+        else:
+            val_indices.append(i)
+            
+    print(f"\n🎤 CHIA DỮ LIỆU THEO OPEN-SET (Unseen Speakers):")
+    print(f"   - Tập Train: {len(train_speakers)} speakers ({len(train_indices)} samples)")
+    print(f"   - Tập Val:   {len(val_speakers)} speakers ({len(val_indices)} samples)\n")
+    
+    # Xáo trộn ngẫu nhiên thứ tự sample trong mỗi tập
+    random.shuffle(train_indices)
+    random.shuffle(val_indices)
 
-    indices = list(range(num_samples))
-    random.seed(RANDOM_SEED)
-    random.shuffle(indices)
-
-    train_end = int(num_samples * TRAIN_RATIO)
+    # Khởi tạo Full Dataset (Vẫn giữ số lượng class tổng để không bị lỗi out-of-bounds index)
     full_dataset = SpeakerDataset(embedding_data, feature_data, speaker_to_idx, mode)
 
     train_loader = DataLoader(
-        Subset(full_dataset, indices[:train_end]),
-        batch_size=batch_size, shuffle=True, num_workers=0,
-        # Thay lambda bằng partial
+        Subset(full_dataset, train_indices),
+        batch_size=batch_size, shuffle=True, num_workers=num_workers,
         collate_fn=partial(collate_fn_general, mode=mode, is_train=True), 
         pin_memory=False
     )
+    
     val_loader = DataLoader(
-        Subset(full_dataset, indices[train_end:]),
-        batch_size=32, shuffle=False, num_workers=0,
-        # Thay lambda bằng partial
+        Subset(full_dataset, val_indices),
+        batch_size=32, shuffle=False, num_workers=num_workers,
         collate_fn=partial(collate_fn_general, mode=mode, is_train=False), 
         pin_memory=False
     )
+    
     return train_loader, val_loader, speaker_to_idx, len(speaker_to_idx)
 
 def create_test_loader(
