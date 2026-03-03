@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from dataset import create_train_val_loaders
 import torch.nn.functional as F
 from metrics import compute_eer, compute_mindcf
+import math
 
 from config import (
     BATCH_SIZE,
@@ -63,6 +64,37 @@ from model import SpeakerVerificationModel, AAMSoftmaxLoss, get_model
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
+def apply_spec_augment(x, freq_mask_param=15, time_mask_param=30):
+    """Áp dụng SpecAugment trực tiếp trên GPU để tăng cường dữ liệu."""
+    b, c, t = x.shape
+    x_aug = x.clone()
+    
+    t_mask = torch.randint(0, time_mask_param, (1,)).item()
+    if t_mask > 0 and t > t_mask:
+        t0 = torch.randint(0, t - t_mask, (1,)).item()
+        x_aug[:, :, t0:t0+t_mask] = 0
+
+    f_mask = torch.randint(0, freq_mask_param, (1,)).item()
+    if f_mask > 0 and c > f_mask:
+        f0 = torch.randint(0, c - f_mask, (1,)).item()
+        x_aug[:, f0:f0+f_mask, :] = 0
+
+    return x_aug
+
+def update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=15):
+    """Tăng dần Margin từ 0.0 lên mức tối đa để mô hình không bị 'sốc' loss ở những epoch đầu."""
+    if epoch >= warmup_epochs:
+        current_margin = final_margin
+    else:
+        current_margin = final_margin * (epoch / warmup_epochs)
+    
+    criterion.margin = current_margin
+    criterion.cos_m = math.cos(current_margin)
+    criterion.sin_m = math.sin(current_margin)
+    criterion.th = math.cos(math.pi - current_margin)
+    criterion.mm = math.sin(math.pi - current_margin) * current_margin
+    
+    return current_margin
 
 
 def save_checkpoint(model, optimizer, epoch, best_loss, checkpoint_path):
@@ -148,7 +180,7 @@ class EarlyStopping:
                 self.early_stop = True
 
 
-def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device, log_interval=LOG_INTERVAL):
+def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device, log_interval=LOG_INTERVAL, use_augment=True):
     """
     Train for one epoch.
 
@@ -179,6 +211,9 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         # Move data to device
         labels = batch_data["label"].to(device)
         inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+
+        if use_augment and "feature" in inputs:
+            inputs["feature"] = apply_spec_augment(inputs["feature"])
 
         if "embedding" in inputs and torch.isnan(inputs["embedding"]).any():
             print(f"\n🚨 PHÁT HIỆN DỮ LIỆU PTM BỊ NaN Ở BATCH {batch_idx}! Đã bỏ qua batch này.")
@@ -414,6 +449,7 @@ def train(args):
     print(f"{'Fusion Method':<30} {args.fusion_method if args.mode == 3 else 'N/A'}")
     print(f"{'Feature Mode':<30} {args.feature_mode if args.mode in [2, 3] else 'N/A'}")
     print(f"{'Use Gating':<30} {args.use_gating if args.mode == 3 else 'N/A'}")
+    print(f"{'Use Augment':<30} {args.use_augment if args.mode in [2, 3] else 'N/A'}")
     print(f"\n{'Learning Rate':<30} {args.learning_rate}")
     print(f"{'Optimizer':<30} {args.optimizer.upper()}")
     print(f"{'Batch Size':<30} {args.batch_size}")
@@ -438,6 +474,7 @@ def train(args):
         "fusion_method": getattr(args, 'fusion_method', 'N/A'),
         "feature_mode": args.feature_mode,
         "use_gating": getattr(args, 'use_gating', False),
+        "use_augment": getattr(args, 'use_augment', False),
         "learning_rate": args.learning_rate,
         "optimizer": args.optimizer,
         "batch_size": args.batch_size,
@@ -552,9 +589,13 @@ def train(args):
 
     print("Starting training...\n")
     for epoch in range(args.num_epochs):
+        #current_margin = update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=5)
+        #print(f"\n[Info] Epoch {epoch + 1}: AAM-Softmax Margin set to {current_margin:.4f}")
+        
         # Train
         train_loss, train_acc = train_epoch(
-            model, train_loader, opt, criterion, scaler, epoch, device
+            model, train_loader, opt, criterion, scaler, epoch, device,
+            use_augment=getattr(args, 'use_augment', False)
         )
 
         # Validate (Nhận thêm eer và mindcf)

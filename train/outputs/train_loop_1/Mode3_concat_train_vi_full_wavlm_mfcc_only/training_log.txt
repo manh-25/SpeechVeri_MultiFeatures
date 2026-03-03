@@ -1,0 +1,30 @@
+Training started: 2026-03-03 06:12:58.618100
+{
+  "exp_name": "Mode3_concat_train_vi_full_wavlm_mfcc_only",
+  "timestamp": "2026-03-03T06:12:25.960009",
+  "device": "cuda",
+  "duration": "train_vi_full",
+  "pretrained_model": "wavlm",
+  "mode": 3,
+  "fusion_method": "concat",
+  "feature_mode": "mfcc_only",
+  "use_gating": false,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 4.4682, Acc: 0.5031 | EER: 15.36%, MinDCF: 0.0389 | LR: 0.000100
+Epoch   2 | Train Loss: 2.0762, Acc: 0.7058 | EER: 18.44%, MinDCF: 0.0384 | LR: 0.000100
+Epoch   3 | Train Loss: 1.3724, Acc: 0.7848 | EER: 22.20%, MinDCF: 0.0383 | LR: 0.000100
+Epoch   4 | Train Loss: 0.9785, Acc: 0.8344 | EER: 17.68%, MinDCF: 0.0366 | LR: 0.000100
+Epoch   5 | Train Loss: 0.7302, Acc: 0.8703 | EER: 19.63%, MinDCF: 0.0377 | LR: 0.000050
+Epoch   6 | Train Loss: 0.4326, Acc: 0.9184 | EER: 23.39%, MinDCF: 0.0378 | LR: 0.000050
+Early stopping triggered!
