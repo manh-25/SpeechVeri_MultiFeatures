@@ -79,7 +79,7 @@ def run_extraction_resume(model_key, folder_path, save_dir, batch_size=16, shard
         subset_indices = list(range(start_idx, end_idx))
         
         subset = Subset(dataset, subset_indices)
-        dataloader = DataLoader(subset, batch_size=batch_size, collate_fn=collate_fn, num_workers=4, pin_memory=True)
+        dataloader = DataLoader(subset, batch_size=batch_size, collate_fn=collate_fn, num_workers=16, pin_memory=True)
         
         shard_embeddings, shard_ids, shard_names = [], [], []
 

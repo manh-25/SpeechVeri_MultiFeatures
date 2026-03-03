@@ -1,0 +1,30 @@
+{
+  "exp_name": "Mode2_HC_train_raw_mfcc_only",
+  "timestamp": "2026-03-03T08:58:39.746697",
+  "config": {
+    "exp_name": "Mode2_HC_train_raw_mfcc_only",
+    "timestamp": "2026-03-03T08:35:33.538444",
+    "device": "cuda",
+    "duration": "train_raw",
+    "pretrained_model": "N/A",
+    "mode": 2,
+    "fusion_method": "",
+    "feature_mode": "mfcc_only",
+    "use_gating": false,
+    "learning_rate": 0.0001,
+    "optimizer": "adam",
+    "batch_size": 256,
+    "num_epochs": 50,
+    "weight_decay": 0.001,
+    "mixed_precision": true,
+    "early_stop_patience": 5,
+    "lr_scheduler": "plateau",
+    "aam_margin": 0.2,
+    "aam_scale": 30
+  },
+  "best_val_eer": 10.97999999999255,
+  "best_val_mindcf": 0.029337500000000002,
+  "final_train_loss": 5.449181625197606,
+  "final_train_accuracy": 0.4680682656844018,
+  "epochs_trained": 19
+}

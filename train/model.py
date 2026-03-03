@@ -154,6 +154,34 @@ class CrossAttentionFusion(nn.Module):
         
         return output
 
+class FiLMFusion(nn.Module):
+    """Feature-wise Linear Modulation (FiLM) Fusion"""
+    def __init__(self, dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM):
+        super().__init__()
+        # dim1 là PTM (tĩnh), dim2 là Handcrafted (động)
+        # Sinh ra Scale (gamma) và Shift (beta) từ PTM
+        self.film_gen = nn.Linear(dim1, dim2 * 2)
+        self.out_proj = nn.Conv1d(dim2, output_dim, kernel_size=1)
+
+    def forward(self, ptm_static, hc_temporal):
+        # ptm_static: (B, D)
+        # hc_temporal: (B, D, T)
+        
+        # Nếu PTM lỡ bị chèn thêm chiều T (B, D, 1), thì bóp nó lại
+        if ptm_static.dim() == 3:
+            ptm_static = ptm_static.squeeze(2)
+            
+        film_params = self.film_gen(ptm_static) # (B, 2*D)
+        gamma, beta = torch.chunk(film_params, 2, dim=1) # (B, D), (B, D)
+        
+        # Reshape để broadcast dọc theo chiều thời gian T
+        gamma = gamma.unsqueeze(2) # (B, D, 1)
+        beta = beta.unsqueeze(2)   # (B, D, 1)
+        
+        # Modulation: Đặc trưng ngữ âm (HC) bị uốn nắn bởi ngữ cảnh người nói (PTM)
+        fused = (hc_temporal * gamma) + beta
+        return self.out_proj(fused)
+
 # ============================================================================
 # SQUEEZE-AND-EXCITATION & ASP POOLING
 # ============================================================================
@@ -172,30 +200,37 @@ class SEBlock(nn.Module):
     def forward(self, x):
         return x * self.se(x)
 
-
 class AttentiveStatisticsPooling(nn.Module):
-    """Tự động tìm và đánh trọng số cho các frame chứa giọng nói (Bỏ qua khoảng lặng)"""
-    def __init__(self, channels):
+    """PTM-Guided Attentive Statistics Pooling"""
+    def __init__(self, channels, ptm_dim=PTM_DIM, use_ptm_guide=False):
         super().__init__()
+        self.use_ptm_guide = use_ptm_guide
+        attn_in_channels = channels + ptm_dim if use_ptm_guide else channels
+        
         self.attention = nn.Sequential(
-            nn.Conv1d(channels, 128, kernel_size=1),
+            nn.Conv1d(attn_in_channels, 128, kernel_size=1),
             nn.Tanh(),
             nn.Conv1d(128, channels, kernel_size=1),
             nn.Softmax(dim=2)
         )
 
-    def forward(self, x):
-        w = self.attention(x) # Trọng số attention cho từng frame
+    def forward(self, x, ptm_context=None):
+        if self.use_ptm_guide and ptm_context is not None:
+            if ptm_context.dim() == 2:
+                ptm_context = ptm_context.unsqueeze(2)
+            ptm_exp = ptm_context.expand(-1, -1, x.size(2))
+            attn_input = torch.cat([x, ptm_exp], dim=1)
+        else:
+            attn_input = x
+
+        w = self.attention(attn_input) 
         
-        # Ép kiểu float32 để chống tràn số (overflow)
         x_f32 = x.float()
         w_f32 = w.float()
         
-        # DÙNG BIẾN f32 ĐỂ TÍNH TOÁN
         mu = torch.sum(x_f32 * w_f32, dim=2)
         sg = torch.sqrt((torch.sum((x_f32**2) * w_f32, dim=2) - mu**2).clamp(min=1e-5))
         
-        # Ghép lại và trả về kiểu dữ liệu gốc (float16) để đưa vào các lớp Linear tiếp theo
         return torch.cat((mu, sg), 1).type_as(x)
 
 # ============================================================================
@@ -238,7 +273,7 @@ class BottleneckBlock(nn.Module):
 
 
 class ECAPATDNN(nn.Module):
-    """ECAPA-TDNN (Tích hợp SE, Dilation động, MFA và ASP)"""
+    """ECAPA-TDNN (Tích hợp SE, Dilation động, MFA và PTM-Guided ASP)"""
     def __init__(
         self,
         input_dim,
@@ -246,31 +281,27 @@ class ECAPATDNN(nn.Module):
         blocks=ECAPA_BLOCKS,
         kernel_size=ECAPA_KERNEL_SIZE,
         embedding_dim=EMBEDDING_DIM,
+        use_ptm_guide=False
     ):
         super().__init__()
-
         self.conv1d_1 = nn.Conv1d(input_dim, channels, kernel_size=1)
         self.bn_1 = nn.BatchNorm1d(channels)
         self.relu = nn.ReLU()
 
-        # TDNN blocks với Dilation tăng dần (2, 3, 4...) để mở rộng tầm nhìn
         self.blocks = nn.ModuleList([
             BottleneckBlock(channels, kernel_size, dilation=d)
             for d in range(2, 2 + blocks)
         ])
 
-        # MFA (Multi-layer Feature Aggregation): Nối output của CẢ 4 block lại với nhau
         self.mfa = nn.Conv1d(channels * (blocks + 1), channels * 3, kernel_size=1)
 
-        # Trí tuệ của mạng: Attentive Statistics Pooling
-        self.pooling = AttentiveStatisticsPooling(channels * 3)
+        self.pooling = AttentiveStatisticsPooling(channels * 3, use_ptm_guide=use_ptm_guide)
         self.bn_pool = nn.BatchNorm1d(channels * 3 * 2)
 
-        # Embedding layers
         self.fc1 = nn.Linear(channels * 3 * 2, embedding_dim)
         self.bn_fc = nn.BatchNorm1d(embedding_dim)
 
-    def forward(self, x):
+    def forward(self, x, ptm_context=None):
         if x.dim() == 2:
             x = x.unsqueeze(-1)
         if x.size(-1) == 1:
@@ -278,21 +309,17 @@ class ECAPATDNN(nn.Module):
 
         x = self.relu(self.bn_1(self.conv1d_1(x)))
 
-        # Chạy qua các block và gom nhặt lại mọi đặc trưng (MFA)
         layer_outputs = [x]
         for block in self.blocks:
             x = block(x)
             layer_outputs.append(x)
 
-        # Nối tất cả các lớp lại
         x = torch.cat(layer_outputs, dim=1)
         x = self.mfa(x)
 
-        # Pooling có chú ý (ASP)
-        x = self.pooling(x)
+        x = self.pooling(x, ptm_context=ptm_context)
         x = self.bn_pool(x)
 
-        # Ra Embedding
         x = self.fc1(x)
         x = self.bn_fc(x)
 
@@ -317,14 +344,14 @@ class SpeakerVerificationModel(nn.Module):
         # Mode 1: PTM only
         if mode == 1:
             self.ptm_encoder = PTMEncoder()
-            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
+            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
 
         # Mode 2: Handcrafted only
         elif mode == 2:
             self.handcrafted_encoder = HandcraftedEncoder(
                 input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
-            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
+            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
 
         # Mode 3: Both with fusion
         elif mode == 3:
@@ -334,19 +361,18 @@ class SpeakerVerificationModel(nn.Module):
             )
 
             if fusion_method == "concat":
-                self.fusion = ConcatenationFusion(
-                    dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM
-                )
+                self.fusion = ConcatenationFusion(dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM)
             elif fusion_method == "cross_attention":
-                self.fusion = CrossAttentionFusion(
-                    dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM
-                )
+                self.fusion = CrossAttentionFusion(dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM)
             elif fusion_method == "gating":
                 self.fusion = GatingMechanism(dim=PTM_DIM)
+            elif fusion_method == "film": # <--- FiLM FUSION ĐÂY
+                self.fusion = FiLMFusion(dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM)
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
 
-            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
+            # Khai báo ECAPA có bật tính năng Guide
+            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=True)
        
 
     def forward(self, return_gates=False, **kwargs):
@@ -386,18 +412,18 @@ class SpeakerVerificationModel(nn.Module):
             speaker_embedding = self.backbone(hc_feat)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 3:
-            embedding = kwargs["embedding"] # (B, 13, 768)
-            feature = kwargs["feature"]     # (B, C_hc, T)
-            # Individual encoders
-            ptm_feat = self.ptm_encoder(embedding)       # (B, PTM_DIM)
-            hc_feat = self.handcrafted_encoder(feature)  # (B, 768, T)
+            embedding = kwargs["embedding"] 
+            feature = kwargs["feature"]     
+            
+            ptm_feat = self.ptm_encoder(embedding)       
+            hc_feat = self.handcrafted_encoder(feature)  
             
             # Fusion
             if self.fusion_method == "cross_attention":
-                # Truyền trực tiếp, CrossAttentionFusion sẽ tự lo phần T
+                fused_feat = self.fusion(ptm_feat, hc_feat)
+            elif self.fusion_method == "film":
                 fused_feat = self.fusion(ptm_feat, hc_feat)
             else:
-                # Gating và Concat thì nhân bản PTM lên trước
                 T = feature.size(-1)
                 ptm_feat_expanded = ptm_feat.unsqueeze(-1).expand(-1, -1, T)
                 
@@ -406,8 +432,8 @@ class SpeakerVerificationModel(nn.Module):
                 else:
                     fused_feat = self.fusion(ptm_feat_expanded, hc_feat)
             
-            # Backbone
-            speaker_embedding = self.backbone(fused_feat)  # (B, EMBEDDING_DIM)
+            # Backbone nhận thêm ptm_feat làm guide cho lớp Pooling
+            speaker_embedding = self.backbone(fused_feat, ptm_context=ptm_feat)
 
         if return_gates and gate_weights is not None:
             return None, speaker_embedding, gate_weights

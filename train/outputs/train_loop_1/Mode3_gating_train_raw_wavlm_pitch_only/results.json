@@ -1,0 +1,35 @@
+{
+  "exp_name": "Mode3_gating_train_raw_wavlm_pitch_only",
+  "timestamp": "2026-03-03T00:36:49.286885",
+  "config": {
+    "exp_name": "Mode3_gating_train_raw_wavlm_pitch_only",
+    "timestamp": "2026-03-03T00:26:35.161960",
+    "device": "cuda",
+    "duration": "train_raw",
+    "pretrained_model": "wavlm",
+    "mode": 3,
+    "fusion_method": "gating",
+    "feature_mode": "pitch_only",
+    "use_gating": true,
+    "learning_rate": 0.0001,
+    "optimizer": "adam",
+    "batch_size": 256,
+    "num_epochs": 50,
+    "weight_decay": 0.001,
+    "mixed_precision": true,
+    "early_stop_patience": 5,
+    "lr_scheduler": "plateau",
+    "aam_margin": 0.2,
+    "aam_scale": 30
+  },
+  "best_val_eer": 10.405000000000001,
+  "best_val_mindcf": 0.027010000000000003,
+  "final_train_loss": 0.3434756938594481,
+  "final_train_accuracy": 0.9339542442922434,
+  "epochs_trained": 7,
+  "gating_analysis": {
+    "ptm_priority_count": 17088020,
+    "hc_priority_count": 3272428,
+    "mean_gate_weight": 0.6898437738418579
+  }
+}

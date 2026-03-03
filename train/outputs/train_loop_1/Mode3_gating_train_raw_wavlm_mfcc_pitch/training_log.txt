@@ -1,0 +1,31 @@
+Training started: 2026-03-03 02:20:43.168404
+{
+  "exp_name": "Mode3_gating_train_raw_wavlm_mfcc_pitch",
+  "timestamp": "2026-03-03T02:20:15.372698",
+  "device": "cuda",
+  "duration": "train_raw",
+  "pretrained_model": "wavlm",
+  "mode": 3,
+  "fusion_method": "gating",
+  "feature_mode": "mfcc_pitch",
+  "use_gating": true,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 4.4791, Acc: 0.4945 | EER: 11.90%, MinDCF: 0.0314 | LR: 0.000100
+Epoch   2 | Train Loss: 2.0963, Acc: 0.7002 | EER: 10.87%, MinDCF: 0.0272 | LR: 0.000100
+Epoch   3 | Train Loss: 1.3909, Acc: 0.7798 | EER: 11.30%, MinDCF: 0.0253 | LR: 0.000100
+Epoch   4 | Train Loss: 0.9915, Acc: 0.8323 | EER: 11.23%, MinDCF: 0.0251 | LR: 0.000100
+Epoch   5 | Train Loss: 0.7317, Acc: 0.8693 | EER: 12.09%, MinDCF: 0.0254 | LR: 0.000100
+Epoch   6 | Train Loss: 0.5507, Acc: 0.8971 | EER: 11.01%, MinDCF: 0.0240 | LR: 0.000050
+Epoch   7 | Train Loss: 0.3203, Acc: 0.9384 | EER: 13.14%, MinDCF: 0.0246 | LR: 0.000050
+Early stopping triggered!

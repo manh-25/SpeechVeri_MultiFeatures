@@ -1,0 +1,30 @@
+Training started: 2026-03-03 02:41:56.520947
+{
+  "exp_name": "Mode3_cross_attention_train_vi_full_hubert_mfbe_only",
+  "timestamp": "2026-03-03T02:41:04.872672",
+  "device": "cuda",
+  "duration": "train_vi_full",
+  "pretrained_model": "hubert",
+  "mode": 3,
+  "fusion_method": "cross_attention",
+  "feature_mode": "mfbe_only",
+  "use_gating": false,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 4.3129, Acc: 0.5230 | EER: 18.35%, MinDCF: 0.0406 | LR: 0.000100
+Epoch   2 | Train Loss: 2.0369, Acc: 0.7144 | EER: 20.03%, MinDCF: 0.0406 | LR: 0.000100
+Epoch   3 | Train Loss: 1.4195, Acc: 0.7799 | EER: 22.51%, MinDCF: 0.0393 | LR: 0.000100
+Epoch   4 | Train Loss: 1.0769, Acc: 0.8206 | EER: 19.79%, MinDCF: 0.0392 | LR: 0.000100
+Epoch   5 | Train Loss: 0.8460, Acc: 0.8506 | EER: 24.74%, MinDCF: 0.0399 | LR: 0.000050
+Epoch   6 | Train Loss: 0.5119, Acc: 0.9032 | EER: 25.16%, MinDCF: 0.0403 | LR: 0.000050
+Early stopping triggered!

@@ -1,0 +1,30 @@
+{
+  "exp_name": "Mode2_HC_train_vi_full_mfbe_pitch",
+  "timestamp": "2026-03-03T11:59:16.272952",
+  "config": {
+    "exp_name": "Mode2_HC_train_vi_full_mfbe_pitch",
+    "timestamp": "2026-03-03T11:33:45.263587",
+    "device": "cuda",
+    "duration": "train_vi_full",
+    "pretrained_model": "N/A",
+    "mode": 2,
+    "fusion_method": "",
+    "feature_mode": "mfbe_pitch",
+    "use_gating": false,
+    "learning_rate": 0.0001,
+    "optimizer": "adam",
+    "batch_size": 256,
+    "num_epochs": 50,
+    "weight_decay": 0.001,
+    "mixed_precision": true,
+    "early_stop_patience": 5,
+    "lr_scheduler": "plateau",
+    "aam_margin": 0.2,
+    "aam_scale": 30
+  },
+  "best_val_eer": 18.32999999999942,
+  "best_val_mindcf": 0.0403625,
+  "final_train_loss": 5.689871220918572,
+  "final_train_accuracy": 0.45030015212184976,
+  "epochs_trained": 18
+}

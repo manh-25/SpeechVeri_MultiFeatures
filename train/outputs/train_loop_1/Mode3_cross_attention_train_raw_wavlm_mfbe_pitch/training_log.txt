@@ -1,0 +1,33 @@
+Training started: 2026-03-03 01:27:20.096302
+{
+  "exp_name": "Mode3_cross_attention_train_raw_wavlm_mfbe_pitch",
+  "timestamp": "2026-03-03T01:26:05.576512",
+  "device": "cuda",
+  "duration": "train_raw",
+  "pretrained_model": "wavlm",
+  "mode": 3,
+  "fusion_method": "cross_attention",
+  "feature_mode": "mfbe_pitch",
+  "use_gating": false,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 4.0658, Acc: 0.5428 | EER: 13.73%, MinDCF: 0.0301 | LR: 0.000100
+Epoch   2 | Train Loss: 1.8886, Acc: 0.7306 | EER: 13.10%, MinDCF: 0.0265 | LR: 0.000100
+Epoch   3 | Train Loss: 1.3179, Acc: 0.7926 | EER: 12.93%, MinDCF: 0.0260 | LR: 0.000100
+Epoch   4 | Train Loss: 1.0012, Acc: 0.8307 | EER: 11.06%, MinDCF: 0.0246 | LR: 0.000100
+Epoch   5 | Train Loss: 0.7878, Acc: 0.8596 | EER: 13.96%, MinDCF: 0.0268 | LR: 0.000100
+Epoch   6 | Train Loss: 0.6420, Acc: 0.8799 | EER: 13.91%, MinDCF: 0.0260 | LR: 0.000100
+Epoch   7 | Train Loss: 0.5328, Acc: 0.8971 | EER: 11.55%, MinDCF: 0.0247 | LR: 0.000100
+Epoch   8 | Train Loss: 0.4453, Acc: 0.9110 | EER: 13.25%, MinDCF: 0.0257 | LR: 0.000050
+Epoch   9 | Train Loss: 0.2488, Acc: 0.9493 | EER: 12.87%, MinDCF: 0.0249 | LR: 0.000050
+Early stopping triggered!
