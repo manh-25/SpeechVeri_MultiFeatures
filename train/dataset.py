@@ -178,10 +178,7 @@ def create_train_val_loaders(embedding_path, feature_path, mode, batch_size, num
     unique_speakers = sorted(set(speaker_ids))
     
     # Xáo trộn danh sách người nói (cố định seed để dễ tái lập)
-    import random
-    random.seed(42)
-    shuffled_speakers = list(unique_speakers)
-    random.shuffle(shuffled_speakers)
+    shuffled_speakers = sorted(list(unique_speakers))
     
     # Cắt 85% NGƯỜI NÓI cho Train, 15% NGƯỜI NÓI cho Val
     num_train_spk = int(len(shuffled_speakers) * TRAIN_RATIO)
