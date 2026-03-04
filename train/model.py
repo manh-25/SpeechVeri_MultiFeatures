@@ -185,141 +185,161 @@ class FiLMFusion(nn.Module):
 # ============================================================================
 # SQUEEZE-AND-EXCITATION & ASP POOLING
 # ============================================================================
-class SEBlock(nn.Module):
-    """Squeeze-and-Excitation Block 1D"""
-    def __init__(self, channels, reduction=8):
-        super().__init__()
+class SEModule(nn.Module):
+    def __init__(self, channels, bottleneck=128):
+        super(SEModule, self).__init__()
         self.se = nn.Sequential(
             nn.AdaptiveAvgPool1d(1),
-            nn.Conv1d(channels, channels // reduction, kernel_size=1),
+            nn.Conv1d(channels, bottleneck, kernel_size=1, padding=0),
             nn.ReLU(),
-            nn.Conv1d(channels // reduction, channels, kernel_size=1),
-            nn.Sigmoid()
+            nn.Conv1d(bottleneck, channels, kernel_size=1, padding=0),
+            nn.Sigmoid(),
         )
 
-    def forward(self, x):
-        return x * self.se(x)
-
+    def forward(self, input):
+        x = self.se(input)
+        return input * x
+    
 class AttentiveStatisticsPooling(nn.Module):
-    """PTM-Guided Attentive Statistics Pooling"""
     def __init__(self, channels, ptm_dim=PTM_DIM, use_ptm_guide=False):
         super().__init__()
         self.use_ptm_guide = use_ptm_guide
-        attn_in_channels = channels + ptm_dim if use_ptm_guide else channels
+        
+        # ECAPA chuẩn tính attention trên global_x gồm 3 phần: mfa + mean + std
+        global_channels = channels * 3 
+        
+        # Nếu có PTM Guide, cộng thêm số chiều của PTM
+        attn_in_channels = global_channels + ptm_dim if use_ptm_guide else global_channels
         
         self.attention = nn.Sequential(
-            nn.Conv1d(attn_in_channels, 128, kernel_size=1),
+            nn.Conv1d(attn_in_channels, 256, kernel_size=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
             nn.Tanh(),
-            nn.Conv1d(128, channels, kernel_size=1),
+            nn.Conv1d(256, channels, kernel_size=1), # Output = channels để nhân với MFA
             nn.Softmax(dim=2)
         )
 
     def forward(self, x, ptm_context=None):
+        # x chính là output của lớp MFA: (B, channels, T)
+        t = x.size()[-1]
+        
+        # 1. Tạo Global Context chuẩn của ECAPA
+        global_x = torch.cat((
+            x, 
+            torch.mean(x, dim=2, keepdim=True).repeat(1, 1, t),
+            torch.sqrt(torch.var(x, dim=2, keepdim=True).clamp(min=1e-4)).repeat(1, 1, t)
+        ), dim=1) # Shape: (B, channels * 3, T)
+        
+        # 2. Ghép thêm PTM Context làm Guide (Ý tưởng gốc của bạn)
         if self.use_ptm_guide and ptm_context is not None:
             if ptm_context.dim() == 2:
-                ptm_context = ptm_context.unsqueeze(2)
-            ptm_exp = ptm_context.expand(-1, -1, x.size(2))
-            attn_input = torch.cat([x, ptm_exp], dim=1)
+                ptm_context = ptm_context.unsqueeze(2) # Ép về (B, D, 1)
+            ptm_exp = ptm_context.expand(-1, -1, t)    # Kéo giãn ra (B, D, T)
+            attn_input = torch.cat([global_x, ptm_exp], dim=1)
         else:
-            attn_input = x
-
+            attn_input = global_x
+            
+        # 3. Tính trọng số Attention
         w = self.attention(attn_input) 
         
-        x_f32 = x.float()
-        w_f32 = w.float()
+        # 4. Tính Weighted Mean và Std
+        mu = torch.sum(x * w, dim=2)
+        sg = torch.sqrt((torch.sum((x**2) * w, dim=2) - mu**2).clamp(min=1e-4))
         
-        mu = torch.sum(x_f32 * w_f32, dim=2)
-        sg = torch.sqrt((torch.sum((x_f32**2) * w_f32, dim=2) - mu**2).clamp(min=1e-5))
-        
-        return torch.cat((mu, sg), 1).type_as(x)
+        # Trả về vector ghép (Mean, Std)
+        return torch.cat((mu, sg), 1)
 
 # ============================================================================
 # ECAPA-TDNN BACKBONE (NÂNG CẤP SOTA)
 # ============================================================================
-class BottleneckBlock(nn.Module):
-    """Bottleneck block tích hợp Squeeze-and-Excitation (SE)"""
-    def __init__(
-        self,
-        channels=ECAPA_CHANNELS,
-        kernel_size=ECAPA_KERNEL_SIZE,
-        dilation=1,
-    ):
-        super().__init__()
-        self.conv1x1_1 = nn.Conv1d(channels, 128, kernel_size=1)
-        self.bn1 = nn.BatchNorm1d(128)
-        
-        self.conv1d = nn.Conv1d(
-            128, 128, kernel_size=kernel_size, 
-            padding=(kernel_size * dilation - dilation) // 2, # Padding chuẩn để không lệch size
-            dilation=dilation
-        )
-        self.bn2 = nn.BatchNorm1d(128)
-        
-        self.conv1x1_2 = nn.Conv1d(128, channels, kernel_size=1)
-        self.bn3 = nn.BatchNorm1d(channels)
-        
-        # Thêm não SE
-        self.se = SEBlock(channels)
+class Bottle2neck(nn.Module):
+    def __init__(self, inplanes, planes, kernel_size=None, dilation=None, scale=8):
+        super(Bottle2neck, self).__init__()
+        width = int(math.floor(planes / scale))
+        self.conv1 = nn.Conv1d(inplanes, width * scale, kernel_size=1)
+        self.bn1 = nn.BatchNorm1d(width * scale)
+        self.nums = scale - 1
+        convs = []
+        bns = []
+        num_pad = math.floor(kernel_size / 2) * dilation
+        for i in range(self.nums):
+            convs.append(nn.Conv1d(width, width, kernel_size=kernel_size, dilation=dilation, padding=num_pad))
+            bns.append(nn.BatchNorm1d(width))
+        self.convs = nn.ModuleList(convs)
+        self.bns = nn.ModuleList(bns)
+        self.conv3 = nn.Conv1d(width * scale, planes, kernel_size=1)
+        self.bn3 = nn.BatchNorm1d(planes)
         self.relu = nn.ReLU()
+        self.width = width
+        self.se = SEModule(planes)
 
     def forward(self, x):
         residual = x
-        x = self.relu(self.bn1(self.conv1x1_1(x)))
-        x = self.relu(self.bn2(self.conv1d(x)))
-        x = self.bn3(self.conv1x1_2(x))
-        x = self.se(x) # Lọc nhiễu channel trước khi cộng
-        x = x + residual
-        return x
+        out = self.relu(self.bn1(self.conv1(x)))
+
+        spx = torch.split(out, self.width, 1)
+        for i in range(self.nums):
+            if i == 0:
+                sp = spx[i]
+            else:
+                sp = sp + spx[i] # Mấu chốt Res2Net: Cộng dồn đặc trưng
+            sp = self.relu(self.bns[i](self.convs[i](sp)))
+            if i == 0:
+                out = sp
+            else:
+                out = torch.cat((out, sp), 1)
+        out = torch.cat((out, spx[self.nums]), 1)
+
+        out = self.bn3(self.conv3(out))
+        out = self.se(out)
+        out += residual
+        return out
 
 
 class ECAPATDNN(nn.Module):
-    """ECAPA-TDNN (Tích hợp SE, Dilation động, MFA và PTM-Guided ASP)"""
-    def __init__(
-        self,
-        input_dim,
-        channels=ECAPA_CHANNELS,
-        blocks=ECAPA_BLOCKS,
-        kernel_size=ECAPA_KERNEL_SIZE,
-        embedding_dim=EMBEDDING_DIM,
-        use_ptm_guide=False
-    ):
+    def __init__(self, input_dim, channels=ECAPA_CHANNELS, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False):
         super().__init__()
-        self.conv1d_1 = nn.Conv1d(input_dim, channels, kernel_size=1)
+        
+        self.conv1d_1 = nn.Conv1d(input_dim, channels, kernel_size=5, stride=1, padding=2)
         self.bn_1 = nn.BatchNorm1d(channels)
         self.relu = nn.ReLU()
 
-        self.blocks = nn.ModuleList([
-            BottleneckBlock(channels, kernel_size, dilation=d)
-            for d in range(2, 2 + blocks)
-        ])
-
-        self.mfa = nn.Conv1d(channels * (blocks + 1), channels * 3, kernel_size=1)
-
-        self.pooling = AttentiveStatisticsPooling(channels * 3, use_ptm_guide=use_ptm_guide)
-        self.bn_pool = nn.BatchNorm1d(channels * 3 * 2)
-
-        self.fc1 = nn.Linear(channels * 3 * 2, embedding_dim)
+        # Khai báo cứng 3 block để dễ dàng thực hiện skip-connection lũy tiến
+        self.layer1 = Bottle2neck(channels, channels, kernel_size=3, dilation=2, scale=8)
+        self.layer2 = Bottle2neck(channels, channels, kernel_size=3, dilation=3, scale=8)
+        self.layer3 = Bottle2neck(channels, channels, kernel_size=3, dilation=4, scale=8)
+        
+        # MFA Layer
+        self.layer4 = nn.Conv1d(3 * channels, 1536, kernel_size=1)
+        
+        # ASP Block
+        self.pooling = AttentiveStatisticsPooling(channels=1536, use_ptm_guide=use_ptm_guide)
+        
+        self.bn_pool = nn.BatchNorm1d(3072) # 1536 * 2 (mu + sg)
+        self.fc1 = nn.Linear(3072, embedding_dim)
         self.bn_fc = nn.BatchNorm1d(embedding_dim)
 
     def forward(self, x, ptm_context=None):
         if x.dim() == 2:
             x = x.unsqueeze(-1)
+        
         if x.size(-1) == 1:
             x = x.expand(-1, -1, 10)
-
+            
         x = self.relu(self.bn_1(self.conv1d_1(x)))
 
-        layer_outputs = [x]
-        for block in self.blocks:
-            x = block(x)
-            layer_outputs.append(x)
+        # Progressive Skip-Connections (CỰC KỲ QUAN TRỌNG)
+        x1 = self.layer1(x)
+        x2 = self.layer2(x + x1)
+        x3 = self.layer3(x + x1 + x2)
 
-        x = torch.cat(layer_outputs, dim=1)
-        x = self.mfa(x)
+        mfa_out = self.relu(self.layer4(torch.cat((x1, x2, x3), dim=1)))
 
-        x = self.pooling(x, ptm_context=ptm_context)
-        x = self.bn_pool(x)
-
+        # Chuyền mfa_out và ptm_context vào Pooling
+        pooled = self.pooling(mfa_out, ptm_context=ptm_context)
+        
+        x = self.bn_pool(pooled)
         x = self.fc1(x)
         x = self.bn_fc(x)
 

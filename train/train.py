@@ -268,78 +268,40 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
     return avg_loss, avg_accuracy
 
 
-def validate(model, val_loader, device):
+def validate(model, val_loader, device, val_trials):
     """
-    Validate Open-set: Chỉ trích xuất embedding và đo EER/MinDCF.
-    Không tính Loss và Accuracy vì tập Val chứa Unseen Speakers.
+    Validate Open-set với Trial List cố định
     """
     model.eval()
     all_embeddings_list = []
-    all_labels_list = []
-
+    
+    # 1. Trích xuất embedding theo đúng thứ tự của val_loader
     with torch.no_grad():
         progress_bar = tqdm(val_loader, desc="Validation (EER)", leave=False)
         for batch_data in progress_bar:
-            labels = batch_data["label"].to(device)
             inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
-
-            # Chỉ cần lấy embedding, bỏ qua logits
             _, embeddings = model(**inputs) 
-            
             all_embeddings_list.append(embeddings.cpu())
-            all_labels_list.append(labels.cpu())
     
-    # ---------------------------------------------------------
-    # TÍNH TOÁN EER & MinDCF (TỐI ƯU HÓA LẤY MẪU CÂN BẰNG)
-    # ---------------------------------------------------------
     all_embeddings = torch.cat(all_embeddings_list, dim=0)
-    all_embeddings = F.normalize(all_embeddings, p=2, dim=1).cpu().numpy()
-    all_labels = torch.cat(all_labels_list, dim=0).cpu().numpy()
+    all_embeddings = F.normalize(all_embeddings, p=2, dim=1).numpy()
 
-    # 1. Phân nhóm index theo từng speaker
-    import random
-    from collections import defaultdict
-    speaker_indices = defaultdict(list)
-    for idx, label in enumerate(all_labels):
-        speaker_indices[label].append(idx)
-
-    pos_pairs = []
-    # 2. Tạo Positive Pairs (Cùng speaker)
-    for label, indices in speaker_indices.items():
-        n = len(indices)
-        if n > 1:
-            for i in range(n):
-                for j in range(i + 1, n):
-                    pos_pairs.append((indices[i], indices[j]))
-
-    random.shuffle(pos_pairs)
-    pos_pairs = pos_pairs[:20000] # Giới hạn 20k cặp positive để chạy nhanh
-
-    neg_pairs = []
-    # 3. Tạo Negative Pairs (Khác speaker) có số lượng tương đương Positive
-    labels_unique = list(speaker_indices.keys())
-    while len(neg_pairs) < len(pos_pairs):
-        spk1, spk2 = random.sample(labels_unique, 2)
-        idx1 = random.choice(speaker_indices[spk1])
-        idx2 = random.choice(speaker_indices[spk2])
-        neg_pairs.append((idx1, idx2))
-
-    # 4. Tính Cosine Similarity (Dot product của 2 vector đã normalize)
+    # 2. Tính Cosine Similarity dựa trên danh sách cặp cố định
     scores = []
     y_true = []
 
-    for idx1, idx2 in pos_pairs:
+    for idx1, idx2 in val_trials["pos_pairs"]:
         scores.append(np.dot(all_embeddings[idx1], all_embeddings[idx2]))
         y_true.append(1)
 
-    for idx1, idx2 in neg_pairs:
+    for idx1, idx2 in val_trials["neg_pairs"]:
         scores.append(np.dot(all_embeddings[idx1], all_embeddings[idx2]))
         y_true.append(0)
 
     scores = np.array(scores)
     y_true = np.array(y_true)
 
-    # 5. Lấy kết quả trả về an toàn
+    # 3. Tính toán metrics
     eer_out = compute_eer(y_true, scores)
     mindcf_out = compute_mindcf(y_true, scores, p_target=0.05)
 
@@ -347,7 +309,6 @@ def validate(model, val_loader, device):
     mindcf = mindcf_out[0] if isinstance(mindcf_out, tuple) else mindcf_out
 
     return float(eer * 100), float(mindcf)
-
 
 # ============================================================================
 # GATING ANALYSIS
@@ -587,6 +548,48 @@ def train(args):
         "val_eer": [], "val_mindcf": [] # Thêm 2 field mới
     }
 
+    # ==========================================================
+    # TẠO DANH SÁCH CẶP VALIDATION CỐ ĐỊNH (FIXED TRIAL LIST)
+    # ==========================================================
+    print("Đang tạo danh sách cặp Validation cố định...")
+    val_labels = []
+    # Quét 1 vòng qua val_loader để lấy label thực tế
+    for batch in val_loader:
+        val_labels.extend(batch["label"].numpy())
+    
+    from collections import defaultdict
+    import random
+    
+    val_speaker_indices = defaultdict(list)
+    for idx, label in enumerate(val_labels):
+        val_speaker_indices[label].append(idx)
+        
+    random.seed(42) # Khóa seed cực kỳ quan trọng
+    pos_pairs, neg_pairs = [], []
+    
+    # Tạo Positive pairs
+    for label, indices in val_speaker_indices.items():
+        n = len(indices)
+        if n > 1:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pos_pairs.append((indices[i], indices[j]))
+                    
+    random.shuffle(pos_pairs)
+    pos_pairs = pos_pairs[:20000] # Giới hạn 20k cặp
+    
+    # Tạo Negative pairs
+    labels_unique = list(val_speaker_indices.keys())
+    while len(neg_pairs) < len(pos_pairs):
+        spk1, spk2 = random.sample(labels_unique, 2)
+        idx1 = random.choice(val_speaker_indices[spk1])
+        idx2 = random.choice(val_speaker_indices[spk2])
+        neg_pairs.append((idx1, idx2))
+        
+    val_trials = {"pos_pairs": pos_pairs, "neg_pairs": neg_pairs}
+    print(f"✓ Đã tạo {len(pos_pairs)} cặp Positive và {len(neg_pairs)} cặp Negative.")
+    # ==========================================================
+
     print("Starting training...\n")
     for epoch in range(args.num_epochs):
         #current_margin = update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=5)
@@ -599,7 +602,7 @@ def train(args):
         )
 
         # Validate (Nhận thêm eer và mindcf)
-        val_eer, val_mindcf = validate(model, val_loader, device)
+        val_eer, val_mindcf = validate(model, val_loader, device, val_trials)
 
         # Update scheduler
         if args.lr_scheduler.lower() == "cosine":
