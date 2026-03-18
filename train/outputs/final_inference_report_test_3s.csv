@@ -1,0 +1,12 @@
+TestSet,Experiment,Mode,Fusion,Feature,PTM,EER (%),MinDCF,Used Pairs,Missing Pairs
+test_3s,Mode1_PTM_train_raw_wav2vec2,1,,N/A,wav2vec2,51.61755775330141,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_full_hubert,1,,N/A,hubert,51.62366499649185,0.9994121105232218,9888,7
+test_3s,Mode1_PTM_train_vi_full_wav2vec2,1,,N/A,wav2vec2,51.62366499649185,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_3s_hubert,1,,N/A,hubert,51.62977223968226,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_full_wavlm,1,,N/A,wavlm,51.66527395671161,0.9994121105232218,9888,7
+test_3s,Mode1_PTM_train_raw_hubert,1,,N/A,hubert,51.68359568628287,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_3s_wav2vec2,1,,N/A,wav2vec2,51.6897029294733,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_5s_hubert,1,,N/A,hubert,51.73741913288349,1.0,9888,7
+test_3s,Mode1_PTM_train_raw_wavlm,1,,N/A,wavlm,51.791242579484106,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_3s_wavlm,1,,N/A,wavlm,51.79734982267452,1.0,9888,7
+test_3s,Mode1_PTM_train_vi_5s_wavlm,1,,N/A,wavlm,51.83895878289428,1.0,9888,7

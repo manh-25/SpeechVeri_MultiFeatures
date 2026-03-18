@@ -1,0 +1,49 @@
+Training started: 2026-03-16 16:38:10.083692
+{
+  "exp_name": "Mode1_PTM_train_vi_3s_wav2vec2",
+  "timestamp": "2026-03-16T16:37:57.068547",
+  "device": "cuda",
+  "duration": "train_vi_3s",
+  "pretrained_model": "wav2vec2",
+  "mode": 1,
+  "fusion_method": "",
+  "feature_mode": "N/A",
+  "use_gating": false,
+  "use_augment": false,
+  "use_speaker_balanced_sampler": false,
+  "speakers_per_batch": 16,
+  "utt_per_speaker": 3,
+  "hard_negative_mining": false,
+  "hard_negative_topk": 8,
+  "hard_negative_weight": 0.03,
+  "hard_negative_margin": 0.06,
+  "augment_prob": 0.2,
+  "feature_noise_std": 0.0015,
+  "embedding_noise_std": 0.0006,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 5.5604, Acc: 0.3327 | EER: 11.18%, MinDCF: 0.5393 | LR: 0.000100
+Epoch   2 | Train Loss: 2.4417, Acc: 0.6057 | EER: 9.04%, MinDCF: 0.4469 | LR: 0.000100
+Epoch   3 | Train Loss: 1.8251, Acc: 0.6833 | EER: 9.04%, MinDCF: 0.4214 | LR: 0.000100
+Epoch   4 | Train Loss: 1.5475, Acc: 0.7211 | EER: 8.33%, MinDCF: 0.3946 | LR: 0.000100
+Epoch   5 | Train Loss: 1.3825, Acc: 0.7456 | EER: 8.34%, MinDCF: 0.3918 | LR: 0.000100
+Epoch   6 | Train Loss: 1.2678, Acc: 0.7636 | EER: 8.41%, MinDCF: 0.3930 | LR: 0.000100
+Epoch   7 | Train Loss: 1.1805, Acc: 0.7773 | EER: 7.61%, MinDCF: 0.3601 | LR: 0.000100
+Epoch   8 | Train Loss: 1.1112, Acc: 0.7889 | EER: 7.18%, MinDCF: 0.3574 | LR: 0.000100
+Epoch   9 | Train Loss: 1.0521, Acc: 0.7990 | EER: 7.04%, MinDCF: 0.3538 | LR: 0.000100
+Epoch  10 | Train Loss: 1.0029, Acc: 0.8078 | EER: 7.50%, MinDCF: 0.3716 | LR: 0.000100
+Epoch  11 | Train Loss: 0.9592, Acc: 0.8159 | EER: 7.70%, MinDCF: 0.3866 | LR: 0.000100
+Epoch  12 | Train Loss: 0.9207, Acc: 0.8224 | EER: 7.38%, MinDCF: 0.3751 | LR: 0.000100
+Epoch  13 | Train Loss: 0.8864, Acc: 0.8284 | EER: 7.59%, MinDCF: 0.3848 | LR: 0.000050
+Epoch  14 | Train Loss: 0.8127, Acc: 0.8427 | EER: 7.33%, MinDCF: 0.3694 | LR: 0.000050
+Early stopping triggered!

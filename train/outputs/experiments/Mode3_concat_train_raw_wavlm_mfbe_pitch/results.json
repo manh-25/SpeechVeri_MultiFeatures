@@ -1,9 +1,9 @@
 {
   "exp_name": "Mode3_concat_train_raw_wavlm_mfbe_pitch",
-  "timestamp": "2026-03-03T16:54:12.065829",
+  "timestamp": "2026-03-17T15:04:00.548210",
   "config": {
     "exp_name": "Mode3_concat_train_raw_wavlm_mfbe_pitch",
-    "timestamp": "2026-03-03T16:33:00.798831",
+    "timestamp": "2026-03-17T14:51:16.801082",
     "device": "cuda",
     "duration": "train_raw",
     "pretrained_model": "wavlm",
@@ -12,6 +12,16 @@
     "feature_mode": "mfbe_pitch",
     "use_gating": false,
     "use_augment": true,
+    "use_speaker_balanced_sampler": false,
+    "speakers_per_batch": 16,
+    "utt_per_speaker": 3,
+    "hard_negative_mining": false,
+    "hard_negative_topk": 8,
+    "hard_negative_weight": 0.03,
+    "hard_negative_margin": 0.06,
+    "augment_prob": 0.2,
+    "feature_noise_std": 0.0015,
+    "embedding_noise_std": 0.0006,
     "learning_rate": 0.0001,
     "optimizer": "adam",
     "batch_size": 256,
@@ -23,9 +33,9 @@
     "aam_margin": 0.2,
     "aam_scale": 30
   },
-  "best_val_eer": 9.095000000085646,
-  "best_val_mindcf": 0.02202,
-  "final_train_loss": 0.09164123545138382,
-  "final_train_accuracy": 0.9836274282708353,
-  "epochs_trained": 13
+  "best_val_eer": 7.630000000000002,
+  "best_val_mindcf": 0.4412000000000003,
+  "final_train_loss": 0.4412240458292197,
+  "final_train_accuracy": 0.9191126802349617,
+  "epochs_trained": 7
 }

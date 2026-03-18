@@ -1,0 +1,48 @@
+Training started: 2026-03-17 16:46:22.587417
+{
+  "exp_name": "Mode3_gating_train_raw_wav2vec2_pitch_only",
+  "timestamp": "2026-03-17T16:45:56.797600",
+  "device": "cuda",
+  "duration": "train_raw",
+  "pretrained_model": "wav2vec2",
+  "mode": 3,
+  "fusion_method": "gating",
+  "feature_mode": "pitch_only",
+  "use_gating": true,
+  "use_augment": true,
+  "use_speaker_balanced_sampler": false,
+  "speakers_per_batch": 16,
+  "utt_per_speaker": 3,
+  "hard_negative_mining": false,
+  "hard_negative_topk": 8,
+  "hard_negative_weight": 0.03,
+  "hard_negative_margin": 0.06,
+  "augment_prob": 0.2,
+  "feature_noise_std": 0.0015,
+  "embedding_noise_std": 0.0006,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 5.0627, Acc: 0.4380 | EER: 10.24%, MinDCF: 0.5522 | LR: 0.000100
+Epoch   2 | Train Loss: 2.3829, Acc: 0.6536 | EER: 10.18%, MinDCF: 0.5348 | LR: 0.000100
+Epoch   3 | Train Loss: 1.7301, Acc: 0.7242 | EER: 10.09%, MinDCF: 0.4970 | LR: 0.000100
+Epoch   4 | Train Loss: 1.3950, Acc: 0.7642 | EER: 10.60%, MinDCF: 0.5032 | LR: 0.000100
+Epoch   5 | Train Loss: 1.1868, Acc: 0.7926 | EER: 10.22%, MinDCF: 0.4809 | LR: 0.000100
+Epoch   6 | Train Loss: 1.0411, Acc: 0.8138 | EER: 10.17%, MinDCF: 0.5091 | LR: 0.000100
+Epoch   7 | Train Loss: 0.9315, Acc: 0.8303 | EER: 10.86%, MinDCF: 0.4975 | LR: 0.000050
+Epoch   8 | Train Loss: 0.8057, Acc: 0.8519 | EER: 9.48%, MinDCF: 0.4532 | LR: 0.000050
+Epoch   9 | Train Loss: 0.7605, Acc: 0.8593 | EER: 9.77%, MinDCF: 0.4783 | LR: 0.000050
+Epoch  10 | Train Loss: 0.7236, Acc: 0.8657 | EER: 9.49%, MinDCF: 0.4623 | LR: 0.000050
+Epoch  11 | Train Loss: 0.6872, Acc: 0.8719 | EER: 9.95%, MinDCF: 0.4765 | LR: 0.000050
+Epoch  12 | Train Loss: 0.6625, Acc: 0.8762 | EER: 10.45%, MinDCF: 0.4674 | LR: 0.000025
+Epoch  13 | Train Loss: 0.6068, Acc: 0.8869 | EER: 9.59%, MinDCF: 0.4549 | LR: 0.000025
+Early stopping triggered!
