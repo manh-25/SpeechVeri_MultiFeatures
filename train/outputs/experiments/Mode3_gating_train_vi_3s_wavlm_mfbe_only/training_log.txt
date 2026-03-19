@@ -35,3 +35,14 @@ Training started: 2026-03-19 11:01:17.260471
 Epoch   1 | Train Loss: 2.6253, Acc: 0.6547 | EER: 4.87%, MinDCF: 0.2819 | LR: 0.000100
 Epoch   2 | Train Loss: 0.8814, Acc: 0.8496 | EER: 4.42%, MinDCF: 0.2512 | LR: 0.000100
 Epoch   3 | Train Loss: 0.5728, Acc: 0.8959 | EER: 4.44%, MinDCF: 0.2350 | LR: 0.000100
+Epoch   4 | Train Loss: 0.4238, Acc: 0.9199 | EER: 4.33%, MinDCF: 0.2331 | LR: 0.000100
+Epoch   5 | Train Loss: 0.3384, Acc: 0.9347 | EER: 4.65%, MinDCF: 0.2506 | LR: 0.000100
+Epoch   6 | Train Loss: 0.2802, Acc: 0.9453 | EER: 4.22%, MinDCF: 0.2090 | LR: 0.000100
+Epoch   7 | Train Loss: 0.2396, Acc: 0.9528 | EER: 4.25%, MinDCF: 0.2336 | LR: 0.000100
+Epoch   8 | Train Loss: 0.2054, Acc: 0.9594 | EER: 4.03%, MinDCF: 0.2380 | LR: 0.000100
+Epoch   9 | Train Loss: 0.1859, Acc: 0.9631 | EER: 4.55%, MinDCF: 0.2269 | LR: 0.000100
+Epoch  10 | Train Loss: 0.1664, Acc: 0.9673 | EER: 4.84%, MinDCF: 0.2487 | LR: 0.000100
+Epoch  11 | Train Loss: 0.1528, Acc: 0.9698 | EER: 4.29%, MinDCF: 0.2044 | LR: 0.000100
+Epoch  12 | Train Loss: 0.1418, Acc: 0.9719 | EER: 4.16%, MinDCF: 0.2107 | LR: 0.000050
+Epoch  13 | Train Loss: 0.0970, Acc: 0.9806 | EER: 4.42%, MinDCF: 0.2376 | LR: 0.000050
+Early stopping triggered!
