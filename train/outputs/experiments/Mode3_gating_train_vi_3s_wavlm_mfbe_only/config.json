@@ -1,6 +1,6 @@
 {
   "exp_name": "Mode3_gating_train_vi_3s_wavlm_mfbe_only",
-  "timestamp": "2026-03-18T14:06:37.687617",
+  "timestamp": "2026-03-19T11:00:18.020927",
   "device": "cuda",
   "duration": "train_vi_3s",
   "pretrained_model": "wavlm",
