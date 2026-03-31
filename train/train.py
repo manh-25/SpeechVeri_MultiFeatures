@@ -13,7 +13,9 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 import os
 import json
+import csv
 import shutil
+import hashlib
 from datetime import datetime
 from tqdm import tqdm
 from torchinfo import summary
@@ -57,6 +59,16 @@ from config import (
     PTM_NUM_LAYERS,
     HANDCRAFTED_DIM,
     DIM_MAP,
+    USE_SPK_BALANCED_SAMPLER,
+    SPK_PER_BATCH,
+    UTT_PER_SPK,
+    HARD_NEGATIVE_MINING,
+    HARD_NEGATIVE_TOPK,
+    HARD_NEGATIVE_WEIGHT,
+    HARD_NEGATIVE_MARGIN,
+    AUGMENT_PROB,
+    FEATURE_NOISE_STD,
+    EMBEDDING_NOISE_STD,
 )
 from model import SpeakerVerificationModel, AAMSoftmaxLoss, get_model
 
@@ -80,6 +92,76 @@ def apply_spec_augment(x, freq_mask_param=15, time_mask_param=30):
         x_aug[:, f0:f0+f_mask, :] = 0
 
     return x_aug
+
+
+def apply_domain_feature_augment(
+    x,
+    augment_prob=0.5,
+    feature_noise_std=0.003,
+):
+    """Augment trên feature-domain để tăng robust khi không còn waveform gốc."""
+    if torch.rand(1).item() >= augment_prob:
+        return x
+
+    x_aug = apply_spec_augment(x)
+
+    if feature_noise_std > 0:
+        x_aug = x_aug + torch.randn_like(x_aug) * feature_noise_std
+
+    if x_aug.shape[-1] > 16 and torch.rand(1).item() < 0.35:
+        drop = max(1, int(x_aug.shape[-1] * 0.08))
+        start = torch.randint(0, x_aug.shape[-1] - drop + 1, (1,)).item()
+        x_aug[:, :, start:start + drop] = 0
+
+    return x_aug
+
+
+def apply_embedding_augment(x, augment_prob=0.5, embedding_noise_std=0.002):
+    """Nhiễu nhẹ cho PTM embedding để tăng ổn định decision boundary."""
+    if torch.rand(1).item() >= augment_prob:
+        return x
+
+    x_aug = x
+    if embedding_noise_std > 0:
+        x_aug = x_aug + torch.randn_like(x_aug) * embedding_noise_std
+
+    if torch.rand(1).item() < 0.25:
+        dropout_mask = (torch.rand_like(x_aug) > 0.02).float()
+        x_aug = x_aug * dropout_mask
+
+    return x_aug
+
+
+def compute_hard_negative_loss(embeddings, labels, topk=20, margin=0.1):
+    """Hard-negative loss đơn giản trên cosine similarity trong batch."""
+    if embeddings.shape[0] < 4:
+        return embeddings.new_tensor(0.0)
+
+    emb_norm = F.normalize(embeddings, p=2, dim=1)
+    sim = torch.matmul(emb_norm, emb_norm.t())
+
+    labels = labels.view(-1)
+    same = labels.unsqueeze(1).eq(labels.unsqueeze(0))
+    eye = torch.eye(labels.size(0), dtype=torch.bool, device=labels.device)
+    pos_mask = same & (~eye)
+    neg_mask = ~same
+
+    if not pos_mask.any() or not neg_mask.any():
+        return embeddings.new_tensor(0.0)
+
+    pos_count = pos_mask.sum(dim=1)
+    pos_mean = (sim * pos_mask.float()).sum(dim=1) / pos_count.clamp(min=1).float()
+
+    neg_sim = sim.masked_fill(~neg_mask, -1e4)
+    k = min(max(1, int(topk)), neg_sim.shape[1])
+    hard_neg = torch.topk(neg_sim, k=k, dim=1).values.mean(dim=1)
+
+    valid_anchor = pos_count > 0
+    if not valid_anchor.any():
+        return embeddings.new_tensor(0.0)
+
+    loss_vec = F.relu(margin + hard_neg[valid_anchor] - pos_mean[valid_anchor])
+    return loss_vec.mean()
 
 def update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=15):
     """Tăng dần Margin từ 0.0 lên mức tối đa để mô hình không bị 'sốc' loss ở những epoch đầu."""
@@ -118,6 +200,282 @@ def load_checkpoint(checkpoint_path, model, optimizer=None):
     epoch = checkpoint["epoch"]
     best_loss = checkpoint["best_loss"]
     return model, optimizer, epoch, best_loss
+
+
+def _map_stageA_to_mode3_state_dict(stageA_state_dict, backbone_target_prefix: str):
+    """Map a Mode1/Mode2 state_dict into Mode3 branch prefixes.
+
+    Mode1 keys: ptm_encoder.*, backbone.*
+    Mode2 keys: handcrafted_encoder.*, backbone.*
+
+    For Mode3, backbone is split into ptm_backbone.* and hc_backbone.*.
+    """
+    mapped = {}
+    for key, value in stageA_state_dict.items():
+        if key.startswith("backbone."):
+            mapped[f"{backbone_target_prefix}." + key[len("backbone."):]] = value
+        else:
+            mapped[key] = value
+    return mapped
+
+
+def _model_has_prefix(model, prefix: str) -> bool:
+    try:
+        for key in model.state_dict().keys():
+            if key.startswith(prefix):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def try_initialize_mode3_from_stageA(model, args, device, exp_dir):
+    """Optional warm-start for Mode3 from already-trained Mode1 + Mode2 checkpoints.
+
+    This is best-effort: if checkpoints aren't found, training proceeds from scratch.
+    """
+    if getattr(args, "mode", None) != 3:
+        return None
+
+    init_report = {
+        "mode1_ckpt": None,
+        "mode2_ckpt": None,
+        "loaded": {
+            "mode1": False,
+            "mode2": False,
+        },
+    }
+
+    output_dir = getattr(args, "output_dir", "./outputs")
+    duration = getattr(args, "duration", "")
+    pretrained_model = getattr(args, "pretrained_model", "")
+    feature_mode = getattr(args, "feature_mode", "")
+
+    # Allow explicit override paths
+    mode1_ckpt = getattr(args, "init_mode1_ckpt", None)
+    mode2_ckpt = getattr(args, "init_mode2_ckpt", None)
+
+    if not mode1_ckpt:
+        exp_name = f"Mode1_PTM_{duration}_{pretrained_model}"
+        mode1_ckpt = os.path.join(output_dir, "experiments", exp_name, BEST_MODEL_NAME)
+    if not mode2_ckpt:
+        exp_name = f"Mode2_HC_{duration}_{feature_mode}"
+        mode2_ckpt = os.path.join(output_dir, "experiments", exp_name, BEST_MODEL_NAME)
+
+    init_report["mode1_ckpt"] = mode1_ckpt
+    init_report["mode2_ckpt"] = mode2_ckpt
+
+    # Load Mode1 -> (ptm_encoder, ptm_backbone)
+    if os.path.exists(mode1_ckpt):
+        checkpoint = torch.load(mode1_ckpt, map_location=device)
+        stageA_sd = checkpoint.get("model_state_dict", checkpoint)
+
+        stageA_sd = {k: v for k, v in stageA_sd.items() if k.startswith("ptm_encoder.") or k.startswith("backbone.")}
+        if _model_has_prefix(model, "ptm_backbone."):
+            mapped_sd = _map_stageA_to_mode3_state_dict(stageA_sd, backbone_target_prefix="ptm_backbone")
+        else:
+            # Mode3 PTM branch may not have a backbone (e.g., PTM head only)
+            mapped_sd = stageA_sd
+
+        incompatible = model.load_state_dict(mapped_sd, strict=False)
+        init_report["loaded"]["mode1"] = True
+        init_report["mode1_incompatible_keys"] = {
+            "missing_keys": list(getattr(incompatible, "missing_keys", [])),
+            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])),
+        }
+        print(f"✓ Initialized Mode3 PTM branch from: {mode1_ckpt}")
+    else:
+        print(f"ℹ Mode1 checkpoint not found (skip init): {mode1_ckpt}")
+
+    # Load Mode2 -> (handcrafted_encoder, hc_backbone)
+    if os.path.exists(mode2_ckpt):
+        checkpoint = torch.load(mode2_ckpt, map_location=device)
+        stageA_sd = checkpoint.get("model_state_dict", checkpoint)
+
+        stageA_sd = {k: v for k, v in stageA_sd.items() if k.startswith("handcrafted_encoder.") or k.startswith("backbone.")}
+        if _model_has_prefix(model, "hc_backbone."):
+            mapped_sd = _map_stageA_to_mode3_state_dict(stageA_sd, backbone_target_prefix="hc_backbone")
+        else:
+            mapped_sd = stageA_sd
+
+        incompatible = model.load_state_dict(mapped_sd, strict=False)
+        init_report["loaded"]["mode2"] = True
+        init_report["mode2_incompatible_keys"] = {
+            "missing_keys": list(getattr(incompatible, "missing_keys", [])),
+            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])),
+        }
+        print(f"✓ Initialized Mode3 HC branch from: {mode2_ckpt}")
+    else:
+        print(f"ℹ Mode2 checkpoint not found (skip init): {mode2_ckpt}")
+
+    try:
+        with open(os.path.join(exp_dir, "init_report.json"), "w", encoding="utf-8") as f:
+            json.dump(init_report, f, indent=2)
+    except Exception as e:
+        print(f"⚠ Could not write init_report.json: {e}")
+
+    return init_report
+
+
+def _build_fixed_val_trials(val_labels, max_pos_pairs=20000, random_seed=42):
+    """Tạo trial list cố định chỉ từ tập validation (không dùng sample train)."""
+    from collections import defaultdict
+    import random
+
+    val_speaker_indices = defaultdict(list)
+    for idx, label in enumerate(val_labels):
+        val_speaker_indices[int(label)].append(idx)
+
+    labels_unique = list(val_speaker_indices.keys())
+    if len(labels_unique) < 2:
+        raise ValueError("Validation set cần >= 2 speakers để tạo positive/negative trials.")
+
+    rng = random.Random(random_seed)
+    pos_pairs, neg_pairs = [], []
+
+    for _, indices in val_speaker_indices.items():
+        n = len(indices)
+        if n > 1:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pos_pairs.append((indices[i], indices[j]))
+
+    rng.shuffle(pos_pairs)
+    pos_pairs = pos_pairs[:max_pos_pairs]
+
+    while len(neg_pairs) < len(pos_pairs):
+        spk1, spk2 = rng.sample(labels_unique, 2)
+        idx1 = rng.choice(val_speaker_indices[spk1])
+        idx2 = rng.choice(val_speaker_indices[spk2])
+        neg_pairs.append((idx1, idx2))
+
+    return {"pos_pairs": pos_pairs, "neg_pairs": neg_pairs}
+
+
+def _extract_val_filenames_from_loader(val_loader):
+    """Lấy danh sách filename theo đúng thứ tự sample của val_loader (phục vụ export trial text)."""
+    val_dataset = val_loader.dataset
+    if not hasattr(val_dataset, "indices") or not hasattr(val_dataset, "dataset"):
+        raise ValueError("val_loader.dataset phải là torch.utils.data.Subset để trích xuất filename ổn định.")
+
+    base_dataset = val_dataset.dataset
+    if not hasattr(base_dataset, "embedding_data") or "filenames" not in base_dataset.embedding_data:
+        raise ValueError("Không tìm thấy embedding_data['filenames'] trong dataset gốc.")
+
+    all_filenames = base_dataset.embedding_data["filenames"]
+    return [str(all_filenames[idx]) for idx in val_dataset.indices]
+
+
+def _write_trials_protocol_csv(trials_csv_file, val_trials, val_filenames):
+    """
+    Ghi trial list theo format CSV 1 cột:
+    "<label> <path_1> <path_2>"
+    label=1: cùng speaker, label=0: khác speaker
+    """
+    with open(trials_csv_file, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        for idx1, idx2 in val_trials["pos_pairs"]:
+            writer.writerow([f"1 {val_filenames[idx1]} {val_filenames[idx2]}"])
+        for idx1, idx2 in val_trials["neg_pairs"]:
+            writer.writerow([f"0 {val_filenames[idx1]} {val_filenames[idx2]}"])
+
+
+def get_or_create_fixed_val_trials(val_loader, args, max_pos_pairs=10000, random_seed=42):
+    """
+    Tạo/lưu trial list cố định theo signature của validation set và tái sử dụng cho mọi lần train.
+    Đảm bảo không leak train->val vì trial chỉ sinh từ val_loader.
+    """
+    val_labels = []
+    for batch in val_loader:
+        val_labels.extend([int(x) for x in batch["label"].tolist()])
+
+    label_bytes = json.dumps(val_labels, separators=(",", ":")).encode("utf-8")
+    val_signature = hashlib.sha1(label_bytes).hexdigest()[:12]
+
+    duration_tag = getattr(args, "duration", "unknown") or "unknown"
+    num_samples = len(val_labels)
+    num_speakers = len(set(val_labels))
+    val_filenames = _extract_val_filenames_from_loader(val_loader)
+
+    trials_dir = os.path.join(args.output_dir, "fixed_val_trials")
+    os.makedirs(trials_dir, exist_ok=True)
+
+    trials_file = os.path.join(
+        trials_dir,
+        f"val_trials_{duration_tag}_{num_samples}s_{num_speakers}spk_{val_signature}.json",
+    )
+    trials_csv_file = os.path.join(
+        trials_dir,
+        f"val_trials_{duration_tag}_{num_samples}s_{num_speakers}spk_{val_signature}.csv",
+    )
+
+    if os.path.exists(trials_file):
+        with open(trials_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        saved_max_pairs = payload.get("meta", {}).get("max_pos_pairs")
+        if saved_max_pairs == max_pos_pairs:
+            val_trials = payload["trials"]
+            print(f"✓ Đã nạp fixed validation trials: {trials_file}")
+            _write_trials_protocol_csv(trials_csv_file, val_trials, val_filenames)
+            print(f"✓ Đã đồng bộ trial protocol csv: {trials_csv_file}")
+        else:
+            print(
+                f"ℹ Fixed trials cũ dùng max_pos_pairs={saved_max_pairs}, "
+                f"đang tạo lại theo cấu hình mới={max_pos_pairs}."
+            )
+            val_trials = _build_fixed_val_trials(
+                val_labels=val_labels,
+                max_pos_pairs=max_pos_pairs,
+                random_seed=random_seed,
+            )
+            payload = {
+                "meta": {
+                    "duration": duration_tag,
+                    "num_samples": num_samples,
+                    "num_speakers": num_speakers,
+                    "max_pos_pairs": max_pos_pairs,
+                    "random_seed": random_seed,
+                    "val_signature": val_signature,
+                    "created_at": datetime.now().isoformat(),
+                },
+                "trials": val_trials,
+            }
+            with open(trials_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            _write_trials_protocol_csv(trials_csv_file, val_trials, val_filenames)
+            print(f"✓ Đã cập nhật fixed validation trials: {trials_file}")
+            print(f"✓ Đã cập nhật trial protocol csv: {trials_csv_file}")
+    else:
+        val_trials = _build_fixed_val_trials(
+            val_labels=val_labels,
+            max_pos_pairs=max_pos_pairs,
+            random_seed=random_seed,
+        )
+
+        payload = {
+            "meta": {
+                "duration": duration_tag,
+                "num_samples": num_samples,
+                "num_speakers": num_speakers,
+                "max_pos_pairs": max_pos_pairs,
+                "random_seed": random_seed,
+                "val_signature": val_signature,
+                "created_at": datetime.now().isoformat(),
+            },
+            "trials": val_trials,
+        }
+        with open(trials_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        _write_trials_protocol_csv(trials_csv_file, val_trials, val_filenames)
+
+        print(f"✓ Đã tạo và lưu fixed validation trials: {trials_file}")
+        print(f"✓ Đã tạo trial protocol csv: {trials_csv_file}")
+
+    print(
+        f"  Positive pairs: {len(val_trials['pos_pairs'])} | "
+        f"Negative pairs: {len(val_trials['neg_pairs'])}"
+    )
+    return val_trials
 
 
 def compute_metrics(logits, labels):
@@ -180,7 +538,24 @@ class EarlyStopping:
                 self.early_stop = True
 
 
-def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device, log_interval=LOG_INTERVAL, use_augment=True):
+def train_epoch(
+    model,
+    train_loader,
+    optimizer,
+    criterion,
+    scaler,
+    epoch,
+    device,
+    log_interval=LOG_INTERVAL,
+    use_augment=True,
+    augment_prob=AUGMENT_PROB,
+    feature_noise_std=FEATURE_NOISE_STD,
+    embedding_noise_std=EMBEDDING_NOISE_STD,
+    hard_negative_mining=HARD_NEGATIVE_MINING,
+    hard_negative_topk=HARD_NEGATIVE_TOPK,
+    hard_negative_weight=HARD_NEGATIVE_WEIGHT,
+    hard_negative_margin=HARD_NEGATIVE_MARGIN,
+):
     """
     Train for one epoch.
 
@@ -210,10 +585,24 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
     for batch_idx, batch_data in enumerate(progress_bar):
         # Move data to device
         labels = batch_data["label"].to(device)
-        inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+        inputs = {
+            k: v.to(device)
+            for k, v in batch_data.items()
+            if isinstance(v, torch.Tensor) and k != "label"
+        }
 
         if use_augment and "feature" in inputs:
-            inputs["feature"] = apply_spec_augment(inputs["feature"])
+            inputs["feature"] = apply_domain_feature_augment(
+                inputs["feature"],
+                augment_prob=augment_prob,
+                feature_noise_std=feature_noise_std,
+            )
+        if use_augment and "embedding" in inputs:
+            inputs["embedding"] = apply_embedding_augment(
+                inputs["embedding"],
+                augment_prob=augment_prob * 0.8,
+                embedding_noise_std=embedding_noise_std,
+            )
 
         if "embedding" in inputs and torch.isnan(inputs["embedding"]).any():
             print(f"\n🚨 PHÁT HIỆN DỮ LIỆU PTM BỊ NaN Ở BATCH {batch_idx}! Đã bỏ qua batch này.")
@@ -232,6 +621,15 @@ def train_epoch(model, train_loader, optimizer, criterion, scaler, epoch, device
         else:
             _, embeddings = model(**inputs)
             loss, logits = criterion(None, labels, embeddings=embeddings)
+
+        if hard_negative_mining:
+            hnm_loss = compute_hard_negative_loss(
+                embeddings=embeddings.float(),
+                labels=labels,
+                topk=hard_negative_topk,
+                margin=hard_negative_margin,
+            )
+            loss = loss + hard_negative_weight * hnm_loss
 
         # Backward pass
         if MIXED_PRECISION:
@@ -279,7 +677,11 @@ def validate(model, val_loader, device, val_trials):
     with torch.no_grad():
         progress_bar = tqdm(val_loader, desc="Validation (EER)", leave=False)
         for batch_data in progress_bar:
-            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+            inputs = {
+                k: v.to(device)
+                for k, v in batch_data.items()
+                if isinstance(v, torch.Tensor) and k != "label"
+            }
             _, embeddings = model(**inputs) 
             all_embeddings_list.append(embeddings.cpu())
     
@@ -328,11 +730,13 @@ def analyze_gating_behavior(model, loader, device, exp_dir):
     with torch.no_grad():
         for batch_data in tqdm(loader, leave=False):
             labels = batch_data["label"].to(device)
-            for key in batch_data:
-                if key != "label":
-                    batch_data[key] = batch_data[key].to(device)
-            
-            _, speaker_embedding, gate_weights = model(return_gates=True, **{k: v for k, v in batch_data.items() if k != "label"})
+            inputs = {
+                k: v.to(device)
+                for k, v in batch_data.items()
+                if isinstance(v, torch.Tensor) and k != "label"
+            }
+
+            _, speaker_embedding, gate_weights = model(return_gates=True, **inputs)
             
             # Average gate weights across embedding dimension
             gate_avg = gate_weights.mean(dim=-1).cpu().numpy()
@@ -424,18 +828,39 @@ def train(args):
     print(f"\n{'Experiment Dir':<30} {exp_dir}")
     print("="*80 + "\n")
 
-    # Save config snapshot
+    use_speaker_balanced_sampler = getattr(args, "use_speaker_balanced_sampler", USE_SPK_BALANCED_SAMPLER)
+    speakers_per_batch = int(getattr(args, "speakers_per_batch", SPK_PER_BATCH))
+    utt_per_speaker = int(getattr(args, "utt_per_speaker", UTT_PER_SPK))
+
+    print(f"{'Spk-Balanced Sampler':<30} {use_speaker_balanced_sampler}")
+    if use_speaker_balanced_sampler:
+        print(f"{'Speakers per Batch':<30} {speakers_per_batch}")
+        print(f"{'Utterances per Speaker':<30} {utt_per_speaker}")
+    print(f"{'Hard Negative Mining':<30} {HARD_NEGATIVE_MINING}")
+    print(f"{'Hard Neg Weight/TopK':<30} {HARD_NEGATIVE_WEIGHT} / {HARD_NEGATIVE_TOPK}")
+    print(f"{'Augment Prob':<30} {AUGMENT_PROB}")
+
     config_snapshot = {
         "exp_name": args.exp_name,
         "timestamp": datetime.now().isoformat(),
         "device": str(device),
-        "duration": getattr(args, 'duration', 'unknown'),             
+        "duration": getattr(args, 'duration', 'unknown'),
         "pretrained_model": getattr(args, 'pretrained_model', 'N/A'),
         "mode": args.mode,
         "fusion_method": getattr(args, 'fusion_method', 'N/A'),
         "feature_mode": args.feature_mode,
         "use_gating": getattr(args, 'use_gating', False),
         "use_augment": getattr(args, 'use_augment', False),
+        "use_speaker_balanced_sampler": use_speaker_balanced_sampler,
+        "speakers_per_batch": speakers_per_batch,
+        "utt_per_speaker": utt_per_speaker,
+        "hard_negative_mining": HARD_NEGATIVE_MINING,
+        "hard_negative_topk": HARD_NEGATIVE_TOPK,
+        "hard_negative_weight": HARD_NEGATIVE_WEIGHT,
+        "hard_negative_margin": HARD_NEGATIVE_MARGIN,
+        "augment_prob": AUGMENT_PROB,
+        "feature_noise_std": FEATURE_NOISE_STD,
+        "embedding_noise_std": EMBEDDING_NOISE_STD,
         "learning_rate": args.learning_rate,
         "optimizer": args.optimizer,
         "batch_size": args.batch_size,
@@ -450,10 +875,16 @@ def train(args):
     with open(os.path.join(exp_dir, "config.json"), "w") as f:
         json.dump(config_snapshot, f, indent=2)
 
-    # Create dataloaders
     print("Loading Train/Val data...")
-    train_loader, val_loader, speaker_to_idx, num_speakers = create_train_val_loaders(
-        args.embedding_path, args.feature_path, args.mode, args.batch_size, num_workers=0
+    train_loader, val_loader, train_speaker_to_idx, num_speakers = create_train_val_loaders(
+        args.embedding_path,
+        args.feature_path,
+        args.mode,
+        args.batch_size,
+        num_workers=0,
+        use_speaker_balanced=use_speaker_balanced_sampler,
+        speakers_per_batch=speakers_per_batch,
+        utt_per_speaker=utt_per_speaker,
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
@@ -468,6 +899,9 @@ def train(args):
         feature_mode=args.feature_mode,
         use_gating=args.use_gating
     )
+
+    # Stage A -> Stage B warm-start (best-effort)
+    init_report = try_initialize_mode3_from_stageA(model, args, device, exp_dir)
 
     # Save model summary
     print("\nGenerating model summary...")
@@ -549,45 +983,15 @@ def train(args):
     }
 
     # ==========================================================
-    # TẠO DANH SÁCH CẶP VALIDATION CỐ ĐỊNH (FIXED TRIAL LIST)
+    # TẠO/NẠP DANH SÁCH CẶP VALIDATION CỐ ĐỊNH (FIXED TRIAL LIST)
     # ==========================================================
-    print("Đang tạo danh sách cặp Validation cố định...")
-    val_labels = []
-    # Quét 1 vòng qua val_loader để lấy label thực tế
-    for batch in val_loader:
-        val_labels.extend(batch["label"].numpy())
-    
-    from collections import defaultdict
-    import random
-    
-    val_speaker_indices = defaultdict(list)
-    for idx, label in enumerate(val_labels):
-        val_speaker_indices[label].append(idx)
-        
-    random.seed(42) # Khóa seed cực kỳ quan trọng
-    pos_pairs, neg_pairs = [], []
-    
-    # Tạo Positive pairs
-    for label, indices in val_speaker_indices.items():
-        n = len(indices)
-        if n > 1:
-            for i in range(n):
-                for j in range(i + 1, n):
-                    pos_pairs.append((indices[i], indices[j]))
-                    
-    random.shuffle(pos_pairs)
-    pos_pairs = pos_pairs[:20000] # Giới hạn 20k cặp
-    
-    # Tạo Negative pairs
-    labels_unique = list(val_speaker_indices.keys())
-    while len(neg_pairs) < len(pos_pairs):
-        spk1, spk2 = random.sample(labels_unique, 2)
-        idx1 = random.choice(val_speaker_indices[spk1])
-        idx2 = random.choice(val_speaker_indices[spk2])
-        neg_pairs.append((idx1, idx2))
-        
-    val_trials = {"pos_pairs": pos_pairs, "neg_pairs": neg_pairs}
-    print(f"✓ Đã tạo {len(pos_pairs)} cặp Positive và {len(neg_pairs)} cặp Negative.")
+    print("Đang chuẩn bị fixed validation trials...")
+    val_trials = get_or_create_fixed_val_trials(
+        val_loader=val_loader,
+        args=args,
+        max_pos_pairs=10000,
+        random_seed=args.seed,
+    )
     # ==========================================================
 
     print("Starting training...\n")
@@ -598,7 +1002,14 @@ def train(args):
         # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, opt, criterion, scaler, epoch, device,
-            use_augment=getattr(args, 'use_augment', False)
+            use_augment=getattr(args, 'use_augment', False),
+            augment_prob=AUGMENT_PROB,
+            feature_noise_std=FEATURE_NOISE_STD,
+            embedding_noise_std=EMBEDDING_NOISE_STD,
+            hard_negative_mining=HARD_NEGATIVE_MINING,
+            hard_negative_topk=HARD_NEGATIVE_TOPK,
+            hard_negative_weight=HARD_NEGATIVE_WEIGHT,
+            hard_negative_margin=HARD_NEGATIVE_MARGIN,
         )
 
         # Validate (Nhận thêm eer và mindcf)

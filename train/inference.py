@@ -3,10 +3,53 @@ import torch.nn.functional as F
 import numpy as np
 import random
 from collections import defaultdict
+import os
 from metrics import compute_eer, compute_mindcf
 from tqdm import tqdm
 
-def evaluate_speaker_verification(model, data_loader, device, num_pairs=50000, p_target=0.05):
+
+def _candidate_keys(path_text):
+    p = str(path_text).replace('\\', '/').strip()
+    base = os.path.basename(p)
+    stem = os.path.splitext(base)[0]
+    rel = p.lstrip('./')
+    candidates = [p, rel, base, stem]
+    seen = set()
+    out = []
+    for key in candidates:
+        if key not in seen:
+            out.append(key)
+            seen.add(key)
+    return out
+
+
+def _load_trials_file(trials_path, max_trials=None):
+    trials = []
+    with open(trials_path, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            label = int(parts[0])
+            path1 = parts[1]
+            path2 = parts[2]
+            trials.append((label, path1, path2))
+            if max_trials is not None and len(trials) >= max_trials:
+                break
+    return trials
+
+def evaluate_speaker_verification(
+    model,
+    data_loader,
+    device,
+    num_pairs=50000,
+    p_target=0.05,
+    trials_path=None,
+    max_trials=None,
+):
     """
     Đánh giá mô hình trên tập Test với thuật toán Lấy mẫu cân bằng (Balanced Sampling)
     Đảm bảo tỷ lệ Positive / Negative là 50/50 để đo EER chuẩn xác nhất.
@@ -14,22 +57,119 @@ def evaluate_speaker_verification(model, data_loader, device, num_pairs=50000, p
     model.eval()
     all_embeddings = []
     all_labels = []
+    all_utt_ids = []
+
+    selected_trials = None
+    required_trial_keys = None
+    if trials_path is not None and os.path.exists(trials_path):
+        selected_trials = _load_trials_file(trials_path, max_trials=max_trials)
+        required_trial_keys = set()
+        for _, path1, path2 in selected_trials:
+            for key in _candidate_keys(path1):
+                required_trial_keys.add(key)
+            for key in _candidate_keys(path2):
+                required_trial_keys.add(key)
 
     print("\n[Evaluation] Trích xuất Embeddings từ tập Test...")
     with torch.no_grad():
         for batch_data in tqdm(data_loader, desc="Extracting"):
+            utt_ids = batch_data.get("utt_id")
             labels = batch_data["label"]
-            inputs = {k: v.to(device) for k, v in batch_data.items() if k != "label"}
+
+            selected_indices = None
+            if required_trial_keys is not None and utt_ids is not None:
+                selected_indices = []
+                for idx, utt in enumerate(utt_ids):
+                    utt_key_hit = False
+                    for key in _candidate_keys(utt):
+                        if key in required_trial_keys:
+                            utt_key_hit = True
+                            break
+                    if utt_key_hit:
+                        selected_indices.append(idx)
+
+                if len(selected_indices) == 0:
+                    continue
+
+            inputs = {
+                k: v.to(device)
+                for k, v in batch_data.items()
+                if isinstance(v, torch.Tensor) and k != "label"
+            }
+
+            if selected_indices is not None:
+                idx_tensor = torch.as_tensor(selected_indices, dtype=torch.long)
+                labels = labels.index_select(0, idx_tensor)
+                inputs = {k: v.index_select(0, idx_tensor).to(device) for k, v in inputs.items()}
+                utt_ids = [utt_ids[i] for i in selected_indices]
             
             # Trích xuất embedding (bỏ qua logits)
             _, embeddings = model(**inputs) 
             all_embeddings.append(embeddings.cpu())
             all_labels.append(labels.cpu())
+            if utt_ids is None:
+                all_utt_ids.extend([str(len(all_utt_ids) + i) for i in range(len(labels))])
+            else:
+                all_utt_ids.extend([str(item) for item in utt_ids])
+
+    if len(all_embeddings) == 0:
+        raise ValueError("Không trích xuất được embedding nào từ data_loader.")
 
     # Gộp và Normalize vector 1 lần duy nhất
     all_embeddings = torch.cat(all_embeddings, dim=0)
     all_embeddings = F.normalize(all_embeddings, p=2, dim=1).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
+
+    if selected_trials is not None:
+        print(f"[Evaluation] Scoring fixed trials from: {trials_path}")
+
+        key_to_indices = defaultdict(list)
+        for index, utt in enumerate(all_utt_ids):
+            for key in _candidate_keys(utt):
+                key_to_indices[key].append(index)
+
+        idx1_list, idx2_list, y_true = [], [], []
+        missing_trials = 0
+        for label, path1, path2 in selected_trials:
+            indices1 = None
+            indices2 = None
+            for key in _candidate_keys(path1):
+                if key in key_to_indices:
+                    indices1 = key_to_indices[key]
+                    break
+            for key in _candidate_keys(path2):
+                if key in key_to_indices:
+                    indices2 = key_to_indices[key]
+                    break
+
+            if not indices1 or not indices2:
+                missing_trials += 1
+                continue
+
+            idx1_list.append(indices1[0])
+            idx2_list.append(indices2[0])
+            y_true.append(label)
+
+        if len(idx1_list) == 0:
+            raise ValueError("No valid trial pairs matched current utterance IDs.")
+
+        emb1 = all_embeddings[idx1_list]
+        emb2 = all_embeddings[idx2_list]
+
+        scores = np.sum(emb1 * emb2, axis=1)
+        y_true = np.array(y_true)
+
+        eer, eer_thresh = compute_eer(y_true, scores)
+        min_dcf, dcf_thresh = compute_mindcf(y_true, scores, p_target=p_target)
+
+        return {
+            "Num Pairs": int(len(y_true)),
+            "Missing Trials": int(missing_trials),
+            "EER (%)": float(eer * 100),
+            "EER Threshold": float(eer_thresh),
+            f"MinDCF (p={p_target})": float(min_dcf),
+            "MinDCF Threshold": float(dcf_thresh)
+        }
     
     print(f"[Evaluation] Đã trích xuất {len(all_labels)} vector. Đang tạo các cặp cân bằng...")
     

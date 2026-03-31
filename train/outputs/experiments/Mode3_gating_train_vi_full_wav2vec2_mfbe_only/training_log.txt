@@ -1,0 +1,45 @@
+Training started: 2026-03-18 02:16:16.195927
+{
+  "exp_name": "Mode3_gating_train_vi_full_wav2vec2_mfbe_only",
+  "timestamp": "2026-03-18T02:15:17.906008",
+  "device": "cuda",
+  "duration": "train_vi_full",
+  "pretrained_model": "wav2vec2",
+  "mode": 3,
+  "fusion_method": "gating",
+  "feature_mode": "mfbe_only",
+  "use_gating": true,
+  "use_augment": true,
+  "use_speaker_balanced_sampler": false,
+  "speakers_per_batch": 16,
+  "utt_per_speaker": 3,
+  "hard_negative_mining": false,
+  "hard_negative_topk": 8,
+  "hard_negative_weight": 0.03,
+  "hard_negative_margin": 0.06,
+  "augment_prob": 0.2,
+  "feature_noise_std": 0.0015,
+  "embedding_noise_std": 0.0006,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 50,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "early_stop_patience": 5,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.2,
+  "aam_scale": 30
+}
+
+Epoch   1 | Train Loss: 5.1421, Acc: 0.4436 | EER: 18.17%, MinDCF: 0.7725 | LR: 0.000100
+Epoch   2 | Train Loss: 2.5458, Acc: 0.6392 | EER: 17.27%, MinDCF: 0.7331 | LR: 0.000100
+Epoch   3 | Train Loss: 1.8354, Acc: 0.7112 | EER: 17.40%, MinDCF: 0.7291 | LR: 0.000100
+Epoch   4 | Train Loss: 1.4550, Acc: 0.7553 | EER: 16.31%, MinDCF: 0.7113 | LR: 0.000100
+Epoch   5 | Train Loss: 1.2129, Acc: 0.7876 | EER: 15.74%, MinDCF: 0.6922 | LR: 0.000100
+Epoch   6 | Train Loss: 1.0394, Acc: 0.8138 | EER: 17.47%, MinDCF: 0.7200 | LR: 0.000100
+Epoch   7 | Train Loss: 0.9151, Acc: 0.8325 | EER: 17.82%, MinDCF: 0.7124 | LR: 0.000100
+Epoch   8 | Train Loss: 0.8217, Acc: 0.8482 | EER: 17.69%, MinDCF: 0.7211 | LR: 0.000100
+Epoch   9 | Train Loss: 0.7443, Acc: 0.8611 | EER: 16.93%, MinDCF: 0.7224 | LR: 0.000050
+Epoch  10 | Train Loss: 0.6296, Acc: 0.8829 | EER: 17.17%, MinDCF: 0.6967 | LR: 0.000050
+Early stopping triggered!

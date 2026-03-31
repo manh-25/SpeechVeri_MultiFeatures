@@ -1,0 +1,18 @@
+=================================================================
+Layer (type:depth-idx)                   Param #
+=================================================================
+SpeakerVerificationModel                 --
+├─PTMEmbeddingHead: 1-1                  --
+│    └─LayerAttentionPooling: 2-1        --
+│    │    └─Linear: 3-1                  769
+│    └─LayerNorm: 2-2                    1,536
+│    └─Sequential: 2-3                   --
+│    │    └─Linear: 3-2                  393,728
+│    │    └─ReLU: 3-3                    --
+│    │    └─LayerNorm: 3-4               1,024
+├─Identity: 1-2                          --
+=================================================================
+Total params: 397,057
+Trainable params: 397,057
+Non-trainable params: 0
+=================================================================

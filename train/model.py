@@ -55,6 +55,47 @@ class PTMEncoder(nn.Module):
         return output
 
 
+class LayerAttentionPooling(nn.Module):
+    """Attentive pooling over the PTM layer dimension.
+
+    Input:  x (B, L, D)
+    Output: pooled (B, D)
+    """
+
+    def __init__(self, dim: int = PTM_DIM):
+        super().__init__()
+        self.score = nn.Linear(dim, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, L, D)
+        attn_logits = self.score(x).squeeze(-1)  # (B, L)
+        attn = F.softmax(attn_logits, dim=1).unsqueeze(-1)  # (B, L, 1)
+        return (x * attn).sum(dim=1)
+
+
+class PTMEmbeddingHead(nn.Module):
+    """PTM-only head for static utterance embedding when no time axis is available.
+
+    Uses attention pooling across PTM layers (L=13) then projects to EMBEDDING_DIM.
+    """
+
+    def __init__(self, ptm_dim: int = PTM_DIM, embedding_dim: int = EMBEDDING_DIM):
+        super().__init__()
+        self.pool = LayerAttentionPooling(dim=ptm_dim)
+        self.in_norm = nn.LayerNorm(ptm_dim)
+        self.proj = nn.Sequential(
+            nn.Linear(ptm_dim, embedding_dim),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, L, D)
+        pooled = self.pool(x)
+        pooled = self.in_norm(pooled)
+        return self.proj(pooled)
+
+
 # ============================================================================
 # HANDCRAFTED FEATURE ENCODER (Auxiliary Encoder)
 # ============================================================================
@@ -181,6 +222,60 @@ class FiLMFusion(nn.Module):
         # Modulation: Đặc trưng ngữ âm (HC) bị uốn nắn bởi ngữ cảnh người nói (PTM)
         fused = (hc_temporal * gamma) + beta
         return self.out_proj(fused)
+
+
+class EmbeddingGatingFusion(nn.Module):
+    """Embedding-level gating fusion.
+
+    Produces a per-dimension gate g in (0,1) and fuses:
+        y = g * ptm + (1-g) * hc
+    """
+
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.gate_fc = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, ptm_emb: torch.Tensor, hc_emb: torch.Tensor, return_gate: bool = False):
+        gate = self.gate_fc(torch.cat([ptm_emb, hc_emb], dim=1))
+        fused = gate * ptm_emb + (1.0 - gate) * hc_emb
+        if return_gate:
+            return fused, gate
+        return fused
+
+
+class EmbeddingConcatFusion(nn.Module):
+    """Embedding-level concatenation fusion + projection."""
+
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+        )
+
+    def forward(self, ptm_emb: torch.Tensor, hc_emb: torch.Tensor):
+        return self.proj(torch.cat([ptm_emb, hc_emb], dim=1))
+
+
+class EmbeddingFiLMFusion(nn.Module):
+    """Embedding-level FiLM: condition HC embedding using PTM, then combine."""
+
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.to_gamma_beta = nn.Linear(embedding_dim, embedding_dim * 2)
+        self.out_ln = nn.LayerNorm(embedding_dim)
+
+    def forward(self, ptm_emb: torch.Tensor, hc_emb: torch.Tensor):
+        gamma, beta = self.to_gamma_beta(ptm_emb).chunk(2, dim=1)
+        gamma = torch.tanh(gamma)
+        hc_mod = hc_emb * (1.0 + gamma) + beta
+        return self.out_ln(hc_mod + ptm_emb)
 
 # ============================================================================
 # SQUEEZE-AND-EXCITATION & ASP POOLING
@@ -363,8 +458,9 @@ class SpeakerVerificationModel(nn.Module):
 
         # Mode 1: PTM only
         if mode == 1:
-            self.ptm_encoder = PTMEncoder()
-            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
+            # Option 2: attention pooling over 13 layers -> projection to 512
+            self.ptm_encoder = PTMEmbeddingHead(ptm_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
+            self.backbone = nn.Identity()
 
         # Mode 2: Handcrafted only
         elif mode == 2:
@@ -375,24 +471,34 @@ class SpeakerVerificationModel(nn.Module):
 
         # Mode 3: Both with fusion
         elif mode == 3:
-            self.ptm_encoder = PTMEncoder()
+            # PTM branch: same as Mode 1 (no ECAPA since PTM has no true time axis)
+            self.ptm_encoder = PTMEmbeddingHead(ptm_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
             self.handcrafted_encoder = HandcraftedEncoder(
                 input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
 
-            if fusion_method == "concat":
-                self.fusion = ConcatenationFusion(dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM)
+            # HC branch: keep ECAPA to exploit real temporal dynamics
+            self.hc_backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
+
+            # Light per-branch normalization before fusion
+            self.ptm_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
+            self.hc_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
+            self.fused_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
+
+            # Embedding-level fusion head
+            if fusion_method == "gating":
+                self.fusion = EmbeddingGatingFusion(EMBEDDING_DIM)
+            elif fusion_method == "film":
+                self.fusion = EmbeddingFiLMFusion(EMBEDDING_DIM)
+            elif fusion_method == "concat":
+                self.fusion = EmbeddingConcatFusion(EMBEDDING_DIM)
             elif fusion_method == "cross_attention":
-                self.fusion = CrossAttentionFusion(dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM)
-            elif fusion_method == "gating":
-                self.fusion = GatingMechanism(dim=PTM_DIM)
-            elif fusion_method == "film": # <--- FiLM FUSION ĐÂY
-                self.fusion = FiLMFusion(dim1=PTM_DIM, dim2=PTM_DIM, output_dim=PTM_DIM)
+                raise ValueError(
+                    "cross_attention has been removed for Mode 3. "
+                    "Use one of: gating, film, concat."
+                )
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
-
-            # Khai báo ECAPA có bật tính năng Guide
-            self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=True)
        
 
     def forward(self, return_gates=False, **kwargs):
@@ -419,10 +525,7 @@ class SpeakerVerificationModel(nn.Module):
 
         if self.mode == 1:
             embedding = kwargs["embedding"]
-            # PTM encoder
-            ptm_feat = self.ptm_encoder(embedding)  # (B, PTM_DIM)
-            # Backbone
-            speaker_embedding = self.backbone(ptm_feat)  # (B, EMBEDDING_DIM)
+            speaker_embedding = self.ptm_encoder(embedding)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 2:
             feature = kwargs["feature"] # (B, C_hc, T)
@@ -435,25 +538,26 @@ class SpeakerVerificationModel(nn.Module):
             embedding = kwargs["embedding"] 
             feature = kwargs["feature"]     
             
-            ptm_feat = self.ptm_encoder(embedding)       
-            hc_feat = self.handcrafted_encoder(feature)  
-            
-            # Fusion
-            if self.fusion_method == "cross_attention":
-                fused_feat = self.fusion(ptm_feat, hc_feat)
-            elif self.fusion_method == "film":
-                fused_feat = self.fusion(ptm_feat, hc_feat)
+            # Encode PTM to embedding directly
+            ptm_emb = self.ptm_encoder(embedding)        # (B, EMBEDDING_DIM)
+
+            # HC -> ECAPA
+            hc_feat = self.handcrafted_encoder(feature)  # (B, PTM_DIM, T)
+            hc_emb = self.hc_backbone(hc_feat)           # (B, EMBEDDING_DIM)
+
+            ptm_emb = self.ptm_emb_ln(ptm_emb)
+            hc_emb = self.hc_emb_ln(hc_emb)
+
+            # Fuse at embedding level
+            if self.fusion_method == "gating":
+                fused_emb, gate_weights = self.fusion(ptm_emb, hc_emb, return_gate=True)
             else:
-                T = feature.size(-1)
-                ptm_feat_expanded = ptm_feat.unsqueeze(-1).expand(-1, -1, T)
-                
-                if self.fusion_method == "gating":
-                    fused_feat, gate_weights = self.fusion(ptm_feat_expanded, hc_feat)
-                else:
-                    fused_feat = self.fusion(ptm_feat_expanded, hc_feat)
-            
-            # Backbone nhận thêm ptm_feat làm guide cho lớp Pooling
-            speaker_embedding = self.backbone(fused_feat, ptm_context=ptm_feat)
+                fused_emb = self.fusion(ptm_emb, hc_emb)
+
+            fused_emb = self.fused_emb_ln(fused_emb)
+            speaker_embedding = fused_emb
+
+        speaker_embedding = F.normalize(speaker_embedding, p=2, dim=1)
 
         if return_gates and gate_weights is not None:
             return None, speaker_embedding, gate_weights

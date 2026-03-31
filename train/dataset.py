@@ -4,12 +4,14 @@ Dataset loader for Speaker Verification
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, Sampler
 import random
 import os
 import glob
 from config import RANDOM_SEED, TRAIN_RATIO, VAL_RATIO
 from functools import partial
+import copy
+import math
 
 
 class SpeakerDataset(Dataset):
@@ -49,9 +51,12 @@ class SpeakerDataset(Dataset):
     def __getitem__(self, idx):
         speaker_id = self.embedding_data["speaker_ids"][idx]
         speaker_label = self.speaker_to_idx[speaker_id]
-        wav_filename = self.embedding_data["filenames"][idx]
+        if "filenames" in self.embedding_data and len(self.embedding_data["filenames"]) > idx:
+            wav_filename = str(self.embedding_data["filenames"][idx])
+        else:
+            wav_filename = str(idx)
 
-        data = {"label": speaker_label}
+        data = {"label": speaker_label, "utt_id": wav_filename}
 
         # 1. PTM Embedding (Thường đã pooling sẵn từ khâu extract)
         if self.mode in [1, 3]:
@@ -64,9 +69,77 @@ class SpeakerDataset(Dataset):
         return data
 
 
+class SpeakerBalancedBatchSampler(Sampler):
+    """Batch sampler theo cấu trúc P speakers x K utterances để tăng ổn định metric-learning."""
+
+    def __init__(
+        self,
+        indices,
+        speaker_ids,
+        speaker_to_idx,
+        speakers_per_batch,
+        utt_per_speaker,
+        seed=RANDOM_SEED,
+        drop_last=True,
+    ):
+        self.indices = list(indices)
+        self.speaker_ids = speaker_ids
+        self.speaker_to_idx = speaker_to_idx
+        self.speakers_per_batch = max(2, int(speakers_per_batch))
+        self.utt_per_speaker = max(1, int(utt_per_speaker))
+        self.batch_size = self.speakers_per_batch * self.utt_per_speaker
+        self.seed = int(seed)
+        self.drop_last = drop_last
+        self.epoch = 0
+
+        self.label_to_indices = {}
+        for idx in self.indices:
+            spk = self.speaker_ids[idx]
+            if spk not in self.speaker_to_idx:
+                continue
+            label = self.speaker_to_idx[spk]
+            self.label_to_indices.setdefault(label, []).append(idx)
+
+        self.labels = sorted(self.label_to_indices.keys())
+        if len(self.labels) < self.speakers_per_batch:
+            raise ValueError(
+                f"Không đủ speakers cho batch cân bằng: cần >= {self.speakers_per_batch}, "
+                f"nhưng chỉ có {len(self.labels)}"
+            )
+
+        if self.drop_last:
+            self.num_batches = max(1, len(self.indices) // self.batch_size)
+        else:
+            self.num_batches = max(1, math.ceil(len(self.indices) / self.batch_size))
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        labels = self.labels.copy()
+
+        for _ in range(self.num_batches):
+            chosen_labels = rng.sample(labels, self.speakers_per_batch)
+            batch = []
+            for label in chosen_labels:
+                pool = self.label_to_indices[label]
+                if len(pool) >= self.utt_per_speaker:
+                    picked = rng.sample(pool, self.utt_per_speaker)
+                else:
+                    picked = [rng.choice(pool) for _ in range(self.utt_per_speaker)]
+                batch.extend(picked)
+
+            rng.shuffle(batch)
+            yield batch
+
+    def __len__(self):
+        return self.num_batches
+
+
 def collate_fn_general(batch, mode, is_train=True, max_frames=200):
     labels = torch.tensor([item["label"] for item in batch], dtype=torch.long)
-    output = {"label": labels}
+    output = {"label": labels, "utt_id": [item["utt_id"] for item in batch]}
 
     if mode in [1,3]:
         output["embedding"] = torch.stack([item["embedding"] for item in batch])
@@ -122,7 +195,7 @@ def load_data(embedding_path, feature_dir=None, mode=1):
     if mode in [1, 3]:
         if os.path.isdir(embedding_path):
             print(f"🔍 Đang quét các file shard PTM tại: {embedding_path}...")
-            shard_files = glob.glob(os.path.join(embedding_path, "*.pt"))
+            shard_files = sorted(glob.glob(os.path.join(embedding_path, "*.pt")))
             
             if not shard_files:
                 raise FileNotFoundError(f"Không tìm thấy file .pt nào trong thư mục {embedding_path}")
@@ -169,7 +242,16 @@ def load_data(embedding_path, feature_dir=None, mode=1):
     return embedding_data, feature_data, speaker_to_idx
 
 
-def create_train_val_loaders(embedding_path, feature_path, mode, batch_size, num_workers=0):
+def create_train_val_loaders(
+    embedding_path,
+    feature_path,
+    mode,
+    batch_size,
+    num_workers=0,
+    use_speaker_balanced=False,
+    speakers_per_batch=16,
+    utt_per_speaker=4,
+):
     # Nạp dữ liệu
     embedding_data, feature_data, speaker_to_idx = load_data(embedding_path, feature_path, mode)
     
@@ -178,7 +260,9 @@ def create_train_val_loaders(embedding_path, feature_path, mode, batch_size, num
     unique_speakers = sorted(set(speaker_ids))
     
     # Xáo trộn danh sách người nói (cố định seed để dễ tái lập)
-    shuffled_speakers = sorted(list(unique_speakers))
+    shuffled_speakers = list(unique_speakers)
+    rng = random.Random(RANDOM_SEED)
+    rng.shuffle(shuffled_speakers)
     
     # Cắt 85% NGƯỜI NÓI cho Train, 15% NGƯỜI NÓI cho Val
     num_train_spk = int(len(shuffled_speakers) * TRAIN_RATIO)
@@ -198,29 +282,58 @@ def create_train_val_loaders(embedding_path, feature_path, mode, batch_size, num
     print(f"\n🎤 CHIA DỮ LIỆU THEO OPEN-SET (Unseen Speakers):")
     print(f"   - Tập Train: {len(train_speakers)} speakers ({len(train_indices)} samples)")
     print(f"   - Tập Val:   {len(val_speakers)} speakers ({len(val_indices)} samples)\n")
-    
-    # Xáo trộn ngẫu nhiên thứ tự sample trong mỗi tập
-    random.shuffle(train_indices)
-    random.shuffle(val_indices)
 
-    # Khởi tạo Full Dataset (Vẫn giữ số lượng class tổng để không bị lỗi out-of-bounds index)
+    # Tạo label mapping độc lập cho train/val (open-set đúng nghĩa)
+    train_speaker_to_idx = {spk: idx for idx, spk in enumerate(sorted(train_speakers))}
+    val_speaker_to_idx = {spk: idx for idx, spk in enumerate(sorted(val_speakers))}
+
+    # Xáo trộn có seed để tái lập tuyệt đối giữa các lần chạy
+    rng.shuffle(train_indices)
+    rng.shuffle(val_indices)
+
     full_dataset = SpeakerDataset(embedding_data, feature_data, speaker_to_idx, mode)
 
-    train_loader = DataLoader(
-        Subset(full_dataset, train_indices),
-        batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        collate_fn=partial(collate_fn_general, mode=mode, is_train=True), 
-        pin_memory=False
-    )
+    train_dataset = copy.copy(full_dataset)
+    train_dataset.speaker_to_idx = train_speaker_to_idx
+    train_dataset.num_speakers = len(train_speaker_to_idx)
+
+    val_dataset = copy.copy(full_dataset)
+    val_dataset.speaker_to_idx = val_speaker_to_idx
+    val_dataset.num_speakers = len(val_speaker_to_idx)
+
+    if use_speaker_balanced:
+        batch_sampler = SpeakerBalancedBatchSampler(
+            indices=train_indices,
+            speaker_ids=speaker_ids,
+            speaker_to_idx=train_speaker_to_idx,
+            speakers_per_batch=speakers_per_batch,
+            utt_per_speaker=utt_per_speaker,
+            seed=RANDOM_SEED,
+            drop_last=True,
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            collate_fn=partial(collate_fn_general, mode=mode, is_train=True),
+            pin_memory=False,
+        )
+    else:
+        train_loader = DataLoader(
+            Subset(train_dataset, train_indices),
+            batch_size=batch_size, shuffle=True, num_workers=num_workers,
+            collate_fn=partial(collate_fn_general, mode=mode, is_train=True), 
+            pin_memory=False
+        )
     
     val_loader = DataLoader(
-        Subset(full_dataset, val_indices),
+        Subset(val_dataset, val_indices),
         batch_size=32, shuffle=False, num_workers=num_workers,
         collate_fn=partial(collate_fn_general, mode=mode, is_train=False), 
         pin_memory=False
     )
-    
-    return train_loader, val_loader, speaker_to_idx, len(speaker_to_idx)
+
+    return train_loader, val_loader, train_speaker_to_idx, len(train_speaker_to_idx)
 
 def create_test_loader(
     test_embedding_path, test_feature_path=None, mode=1, batch_size=64, num_workers=0
