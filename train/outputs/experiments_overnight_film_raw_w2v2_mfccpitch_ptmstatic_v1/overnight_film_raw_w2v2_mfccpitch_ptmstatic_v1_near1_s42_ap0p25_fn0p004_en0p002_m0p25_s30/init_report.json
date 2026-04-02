@@ -1,0 +1,50 @@
+{
+  "mode1_ckpt": "./outputs\\experiments\\Mode1_PTM_train_raw_wav2vec2\\best_model.pth",
+  "mode2_ckpt": "./outputs\\experiments\\Mode2_HC_train_raw_mfcc_pitch\\best_model.pth",
+  "loaded": {
+    "mode1": true,
+    "mode2": true
+  },
+  "mode1_incompatible_keys": {
+    "missing_keys": [
+      "ptm_encoder.input_ln.weight",
+      "ptm_encoder.input_ln.bias",
+      "ptm_encoder.layer_context.0.weight",
+      "ptm_encoder.layer_context.2.weight",
+      "ptm_encoder.layer_context_ln.weight",
+      "ptm_encoder.layer_context_ln.bias",
+      "ptm_encoder.stats_proj.0.weight",
+      "ptm_encoder.stats_proj.0.bias",
+      "ptm_encoder.stats_proj.2.weight",
+      "ptm_encoder.stats_proj.2.bias",
+      "ptm_encoder.out_fuse.0.weight",
+      "ptm_encoder.out_fuse.0.bias",
+      "ptm_encoder.out_fuse.2.weight",
+      "ptm_encoder.out_fuse.2.bias",
+      "ptm_emb_ln.weight",
+      "ptm_emb_ln.bias"
+    ],
+    "unexpected_keys": []
+  },
+  "mode1_load_summary": {
+    "candidate_keys": 8,
+    "shape_matched_keys": 8,
+    "coverage_ratio": 1.0,
+    "raw_missing_key_count": 238,
+    "raw_unexpected_key_count": 0
+  },
+  "mode2_incompatible_keys": {
+    "missing_keys": [
+      "hc_emb_ln.weight",
+      "hc_emb_ln.bias"
+    ],
+    "unexpected_keys": []
+  },
+  "mode2_load_summary": {
+    "candidate_keys": 247,
+    "shape_matched_keys": 247,
+    "coverage_ratio": 1.0,
+    "raw_missing_key_count": 32,
+    "raw_unexpected_key_count": 0
+  }
+}

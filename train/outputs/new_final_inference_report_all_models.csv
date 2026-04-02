@@ -1,0 +1,5 @@
+TestSet,Experiment,Mode,Fusion,Feature,PTM,EER (%),MinDCF,Used Pairs,Missing Pairs
+full_length,Mode3_film_train_raw_wav2vec2_mfcc_pitch_bdrop0p05_no2stage,3,film,mfcc_pitch,wav2vec2,4.294300727091947,0.5309891947719277,9895,0
+full_length,Mode3_film_train_raw_wav2vec2_mfcc_pitch_bdrop0p0_no2stage,3,film,mfcc_pitch,wav2vec2,4.375457663762538,0.5498569888213417,9895,0
+test_vi,Mode3_film_train_raw_wav2vec2_mfcc_pitch_bdrop0p05_no2stage,3,film,mfcc_pitch,wav2vec2,5.8036258210193985,0.38302890222985814,7148,0
+test_vi,Mode3_film_train_raw_wav2vec2_mfcc_pitch_bdrop0p0_no2stage,3,film,mfcc_pitch,wav2vec2,5.99889432118318,0.4089770051547642,7148,0

@@ -446,13 +446,14 @@ class ECAPATDNN(nn.Module):
 class SpeakerVerificationModel(nn.Module):
     """Complete speaker verification model"""
 
-    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=False):
+    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=False, branch_dropout_prob: float = 0.0):
         super().__init__()
         self.mode = mode
         self.fusion_method = fusion_method
         self.feature_mode = feature_mode
         self.use_gating = use_gating
         self.num_speakers = num_speakers
+        self.branch_dropout_prob = float(max(0.0, min(1.0, branch_dropout_prob)))
 
         actual_input_dim = DIM_MAP.get(feature_mode, 81)
 
@@ -499,6 +500,25 @@ class SpeakerVerificationModel(nn.Module):
                 )
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
+
+    def _apply_mode3_branch_dropout(self, ptm_emb: torch.Tensor, hc_emb: torch.Tensor):
+        if (not self.training) or self.branch_dropout_prob <= 0.0:
+            return ptm_emb, hc_emb
+
+        batch_size = ptm_emb.shape[0]
+        device = ptm_emb.device
+        keep_prob = 1.0 - self.branch_dropout_prob
+
+        ptm_keep = (torch.rand(batch_size, 1, device=device) < keep_prob).float()
+        hc_keep = (torch.rand(batch_size, 1, device=device) < keep_prob).float()
+
+        both_drop = (ptm_keep + hc_keep) == 0
+        if both_drop.any():
+            choose_ptm = (torch.rand(batch_size, 1, device=device) < 0.5).float()
+            ptm_keep = torch.where(both_drop, choose_ptm, ptm_keep)
+            hc_keep = torch.where(both_drop, 1.0 - choose_ptm, hc_keep)
+
+        return ptm_emb * ptm_keep, hc_emb * hc_keep
        
 
     def forward(self, return_gates=False, **kwargs):
@@ -547,6 +567,7 @@ class SpeakerVerificationModel(nn.Module):
 
             ptm_emb = self.ptm_emb_ln(ptm_emb)
             hc_emb = self.hc_emb_ln(hc_emb)
+            ptm_emb, hc_emb = self._apply_mode3_branch_dropout(ptm_emb, hc_emb)
 
             # Fuse at embedding level
             if self.fusion_method == "gating":
@@ -604,7 +625,7 @@ class AAMSoftmaxLoss(nn.Module):
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=True):
+def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=True, branch_dropout_prob: float = 0.0):
     """
     Create and initialize model.
 
@@ -624,7 +645,8 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
         mode=mode,
         fusion_method=fusion_method,
         feature_mode=feature_mode,
-        use_gating=use_gating
+        use_gating=use_gating,
+        branch_dropout_prob=branch_dropout_prob,
     )
     model = model.to(device)
 
@@ -635,6 +657,7 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
         print(f"  Fusion method: {fusion_method}")
         print(f"  Feature mode: {feature_mode}")
         print(f"  Use gating: {use_gating}")
+        print(f"  Branch dropout prob: {branch_dropout_prob}")
     print(f"  Num speakers: {num_speakers}")
     print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
