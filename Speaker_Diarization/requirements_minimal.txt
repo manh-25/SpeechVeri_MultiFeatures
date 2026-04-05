@@ -1,0 +1,13 @@
+torch
+torchaudio
+pyannote-audio==4.0.4
+pyannote-core==6.0.1
+pyannote-database==6.1.1
+pyannote-pipeline==4.0.0
+pyannoteai-sdk==0.4.0
+numpy==2.4.3
+scipy==1.16.0
+librosa==0.11.0
+soundfile==0.13.1
+tqdm==4.67.1
+matplotlib==3.10.3
