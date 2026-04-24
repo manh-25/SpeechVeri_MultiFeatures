@@ -5,5 +5,3 @@
 *.venv
 *.pth
 .streamlit
-**/tensorboard_logs/
-**/events.out.tfevents.*

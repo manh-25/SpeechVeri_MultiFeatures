@@ -665,30 +665,13 @@ class ECAPATDNN(nn.Module):
 class SpeakerVerificationModel(nn.Module):
     """Complete speaker verification model"""
 
-    def __init__(
-        self,
-        num_speakers,
-        mode=MODE,
-        fusion_method=FUSION_METHOD,
-        feature_mode="mfbe_pitch",
-        use_gating=False,
-        branch_dropout_prob: float = 0.0,
-        mode3_ptm_residual_alpha: float = 0.0,
-        use_ptm_on_the_fly: bool = False,
-        ptm_model_id: str = "facebook/wav2vec2-base",
-        ptm_sample_rate: int = 16000,
-    ):
+    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=False):
         super().__init__()
         self.mode = mode
         self.fusion_method = fusion_method
         self.feature_mode = feature_mode
         self.use_gating = use_gating
         self.num_speakers = num_speakers
-        self.branch_dropout_prob = float(max(0.0, min(1.0, branch_dropout_prob)))
-        self.mode3_ptm_residual_alpha = float(max(0.0, min(1.0, mode3_ptm_residual_alpha)))
-        self.use_ptm_on_the_fly = bool(use_ptm_on_the_fly)
-        self.ptm_model_id = str(ptm_model_id)
-        self.ptm_sample_rate = int(ptm_sample_rate)
 
         actual_input_dim = DIM_MAP.get(feature_mode, 81)
 
@@ -738,32 +721,6 @@ class SpeakerVerificationModel(nn.Module):
                 self.fusion = TemporalCrossAttentionFusion(dim=PTM_DIM, num_heads=8)
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
-
-    def _apply_mode3_branch_dropout(self, ptm_seq: torch.Tensor, hc_seq: torch.Tensor):
-        if (not self.training) or self.branch_dropout_prob <= 0.0:
-            return ptm_seq, hc_seq
-
-        batch_size = ptm_seq.shape[0]
-        device = ptm_seq.device
-        keep_prob = 1.0 - self.branch_dropout_prob
-
-        ptm_keep = (torch.rand(batch_size, 1, 1, device=device) < keep_prob).float()
-        hc_keep = (torch.rand(batch_size, 1, 1, device=device) < keep_prob).float()
-
-        both_drop = (ptm_keep + hc_keep) == 0
-        if both_drop.any():
-            choose_ptm = (torch.rand(batch_size, 1, 1, device=device) < 0.5).float()
-            ptm_keep = torch.where(both_drop, choose_ptm, ptm_keep)
-            hc_keep = torch.where(both_drop, 1.0 - choose_ptm, hc_keep)
-
-        return ptm_seq * ptm_keep, hc_seq * hc_keep
-
-    @staticmethod
-    def _align_hc_to_ptm_time(hc_feat: torch.Tensor, target_t: int):
-        # hc_feat: (B, D, T_hc) -> (B, T_target, D)
-        if hc_feat.size(-1) != target_t:
-            hc_feat = F.interpolate(hc_feat, size=target_t, mode="linear", align_corners=False)
-        return hc_feat.transpose(1, 2).contiguous()
        
 
     def forward(self, return_gates=False, **kwargs):
@@ -809,14 +766,22 @@ class SpeakerVerificationModel(nn.Module):
             speaker_embedding = self.backbone(hc_feat)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 3:
-            if "embedding" in kwargs:
-                embedding = kwargs["embedding"]
-                embedding_lengths = kwargs.get("embedding_lengths")
-            elif self.use_ptm_on_the_fly and "audio" in kwargs:
-                embedding, embedding_lengths = self.ptm_extractor(
-                    kwargs["audio"],
-                    kwargs.get("audio_lengths"),
-                )
+            embedding = kwargs["embedding"] 
+            feature = kwargs["feature"]     
+            
+            # Encode PTM to embedding directly
+            ptm_emb = self.ptm_encoder(embedding)        # (B, EMBEDDING_DIM)
+
+            # HC -> ECAPA
+            hc_feat = self.handcrafted_encoder(feature)  # (B, PTM_DIM, T)
+            hc_emb = self.hc_backbone(hc_feat)           # (B, EMBEDDING_DIM)
+
+            ptm_emb = self.ptm_emb_ln(ptm_emb)
+            hc_emb = self.hc_emb_ln(hc_emb)
+
+            # Fuse at embedding level
+            if self.fusion_method == "gating":
+                fused_emb, gate_weights = self.fusion(ptm_emb, hc_emb, return_gate=True)
             else:
                 raise KeyError("Mode3 requires 'embedding' or ('audio' with use_ptm_on_the_fly=True).")
             feature = kwargs["feature"]
@@ -894,19 +859,7 @@ class AAMSoftmaxLoss(nn.Module):
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def get_model(
-    num_speakers,
-    device="cuda",
-    mode=MODE,
-    fusion_method=FUSION_METHOD,
-    feature_mode="mfbe_pitch",
-    use_gating=True,
-    branch_dropout_prob: float = 0.0,
-    mode3_ptm_residual_alpha: float = 0.0,
-    use_ptm_on_the_fly: bool = False,
-    ptm_model_id: str = "facebook/wav2vec2-base",
-    ptm_sample_rate: int = 16000,
-):
+def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=True):
     """
     Create and initialize model.
 
@@ -926,12 +879,7 @@ def get_model(
         mode=mode,
         fusion_method=fusion_method,
         feature_mode=feature_mode,
-        use_gating=use_gating,
-        branch_dropout_prob=branch_dropout_prob,
-        mode3_ptm_residual_alpha=mode3_ptm_residual_alpha,
-        use_ptm_on_the_fly=bool(use_ptm_on_the_fly),
-        ptm_model_id=ptm_model_id,
-        ptm_sample_rate=int(ptm_sample_rate),
+        use_gating=use_gating
     )
     model = model.to(device)
 
@@ -942,13 +890,6 @@ def get_model(
         print(f"  Fusion method: {fusion_method}")
         print(f"  Feature mode: {feature_mode}")
         print(f"  Use gating: {use_gating}")
-        print(f"  Branch dropout prob: {branch_dropout_prob}")
-        print(f"  Mode3 PTM residual alpha: {mode3_ptm_residual_alpha}")
-    if mode in [1, 3]:
-        print(f"  PTM on-the-fly: {bool(use_ptm_on_the_fly)}")
-        if bool(use_ptm_on_the_fly):
-            print(f"  PTM runtime model: {ptm_model_id}")
-            print(f"  PTM sample rate: {int(ptm_sample_rate)}")
     print(f"  Num speakers: {num_speakers}")
     print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")

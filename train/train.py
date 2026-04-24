@@ -434,38 +434,6 @@ def _model_has_prefix(model, prefix: str) -> bool:
     return False
 
 
-def _summarize_warmstart_load(model, mapped_sd, incompatible, relevant_prefixes):
-    model_sd = model.state_dict()
-
-    candidate_keys = [k for k in mapped_sd.keys() if k in model_sd]
-    shape_matched_keys = [
-        k for k in candidate_keys
-        if hasattr(mapped_sd[k], "shape") and hasattr(model_sd[k], "shape") and tuple(mapped_sd[k].shape) == tuple(model_sd[k].shape)
-    ]
-
-    raw_missing = list(getattr(incompatible, "missing_keys", []))
-    raw_unexpected = list(getattr(incompatible, "unexpected_keys", []))
-
-    filtered_missing = [
-        k for k in raw_missing
-        if any(k.startswith(prefix) for prefix in relevant_prefixes)
-    ]
-    filtered_unexpected = [
-        k for k in raw_unexpected
-        if any(k.startswith(prefix) for prefix in relevant_prefixes)
-    ]
-
-    return {
-        "candidate_keys": int(len(candidate_keys)),
-        "shape_matched_keys": int(len(shape_matched_keys)),
-        "coverage_ratio": float(len(shape_matched_keys) / max(1, len(candidate_keys))),
-        "missing_keys": filtered_missing,
-        "unexpected_keys": filtered_unexpected,
-        "raw_missing_key_count": int(len(raw_missing)),
-        "raw_unexpected_key_count": int(len(raw_unexpected)),
-    }
-
-
 def try_initialize_mode3_from_stageA(model, args, device, exp_dir):
     """Optional warm-start for Mode3 from already-trained Mode1 + Mode2 checkpoints.
 
@@ -534,30 +502,12 @@ def try_initialize_mode3_from_stageA(model, args, device, exp_dir):
         )
 
         incompatible = model.load_state_dict(mapped_sd, strict=False)
-        mode1_summary = _summarize_warmstart_load(
-            model=model,
-            mapped_sd=mapped_sd,
-            incompatible=incompatible,
-            relevant_prefixes=("ptm_encoder.", "ptm_backbone.", "ptm_emb_ln."),
-        )
         init_report["loaded"]["mode1"] = True
         init_report["mode1_incompatible_keys"] = {
-            "missing_keys": mode1_summary["missing_keys"],
-            "unexpected_keys": mode1_summary["unexpected_keys"],
-        }
-        init_report["mode1_load_summary"] = {
-            "candidate_keys": mode1_summary["candidate_keys"],
-            "shape_matched_keys": mode1_summary["shape_matched_keys"],
-            "coverage_ratio": mode1_summary["coverage_ratio"],
-            "raw_missing_key_count": mode1_summary["raw_missing_key_count"],
-            "raw_unexpected_key_count": mode1_summary["raw_unexpected_key_count"],
+            "missing_keys": list(getattr(incompatible, "missing_keys", [])),
+            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])),
         }
         print(f"✓ Initialized Mode3 PTM branch from: {mode1_ckpt}")
-        print(
-            f"  ↳ Mode1 warm-start coverage: "
-            f"{mode1_summary['shape_matched_keys']}/{mode1_summary['candidate_keys']} "
-            f"({mode1_summary['coverage_ratio'] * 100:.1f}%)"
-        )
     else:
         print(f"ℹ Mode1 checkpoint not found (skip init): {mode1_ckpt}")
 
@@ -573,30 +523,12 @@ def try_initialize_mode3_from_stageA(model, args, device, exp_dir):
             mapped_sd = stageA_sd
 
         incompatible = model.load_state_dict(mapped_sd, strict=False)
-        mode2_summary = _summarize_warmstart_load(
-            model=model,
-            mapped_sd=mapped_sd,
-            incompatible=incompatible,
-            relevant_prefixes=("handcrafted_encoder.", "hc_backbone.", "hc_emb_ln."),
-        )
         init_report["loaded"]["mode2"] = True
         init_report["mode2_incompatible_keys"] = {
-            "missing_keys": mode2_summary["missing_keys"],
-            "unexpected_keys": mode2_summary["unexpected_keys"],
-        }
-        init_report["mode2_load_summary"] = {
-            "candidate_keys": mode2_summary["candidate_keys"],
-            "shape_matched_keys": mode2_summary["shape_matched_keys"],
-            "coverage_ratio": mode2_summary["coverage_ratio"],
-            "raw_missing_key_count": mode2_summary["raw_missing_key_count"],
-            "raw_unexpected_key_count": mode2_summary["raw_unexpected_key_count"],
+            "missing_keys": list(getattr(incompatible, "missing_keys", [])),
+            "unexpected_keys": list(getattr(incompatible, "unexpected_keys", [])),
         }
         print(f"✓ Initialized Mode3 HC branch from: {mode2_ckpt}")
-        print(
-            f"  ↳ Mode2 warm-start coverage: "
-            f"{mode2_summary['shape_matched_keys']}/{mode2_summary['candidate_keys']} "
-            f"({mode2_summary['coverage_ratio'] * 100:.1f}%)"
-        )
     else:
         print(f"ℹ Mode2 checkpoint not found (skip init): {mode2_ckpt}")
 
@@ -883,149 +815,6 @@ class EarlyStopping:
                 print(f"EarlyStopping counter: {self.counter}/{self.patience}")
             if self.counter >= self.patience:
                 self.early_stop = True
-
-    def reset(self, best_value=None, keep_best=False):
-        self.counter = 0
-        if best_value is not None:
-            self.best_loss = float(best_value)
-        elif not keep_best:
-            self.best_loss = None
-        self.early_stop = False
-
-
-def _set_module_trainable(module, trainable: bool):
-    if module is None:
-        return
-    for p in module.parameters():
-        p.requires_grad = bool(trainable)
-
-
-def _apply_mode3_ptm_trainability_policy(
-    model,
-    freeze_ptm_extractor: bool,
-    train_mode3_ptm_layer_fusion: bool,
-):
-    """Apply Mode3 trainability policy.
-
-    - PTM extractor modules are frozen/unfrozen by freeze_ptm_extractor.
-    - PTM multi-layer temporal fusion modules remain trainable when
-      train_mode3_ptm_layer_fusion=True.
-    """
-    extractor_attr_candidates = [
-        "ptm_extractor",
-        "ptm_backbone",
-        "ptm_model",
-        "ptm_feature_extractor",
-        "wav2vec2",
-        "hubert",
-        "wavlm",
-    ]
-
-    for attr in extractor_attr_candidates:
-        _set_module_trainable(getattr(model, attr, None), not freeze_ptm_extractor)
-
-    # Keep PTM layer fusion trainable by default (user requirement).
-    _set_module_trainable(getattr(model, "ptm_temporal_encoder", None), train_mode3_ptm_layer_fusion)
-    _set_module_trainable(getattr(model, "ptm_seq_ln", None), train_mode3_ptm_layer_fusion)
-    _set_module_trainable(getattr(model, "ptm_encoder", None), train_mode3_ptm_layer_fusion)
-    _set_module_trainable(getattr(model, "ptm_emb_ln", None), train_mode3_ptm_layer_fusion)
-
-
-def _print_mode3_trainable_group_summary(model):
-    def _count(module):
-        if module is None:
-            return 0
-        return int(sum(p.numel() for p in module.parameters() if p.requires_grad))
-
-    groups = {
-        "PTM Extractor": sum(
-            _count(getattr(model, attr, None))
-            for attr in [
-                "ptm_extractor",
-                "ptm_backbone",
-                "ptm_model",
-                "ptm_feature_extractor",
-                "wav2vec2",
-                "hubert",
-                "wavlm",
-            ]
-        ),
-        "PTM Layer Fusion": _count(getattr(model, "ptm_temporal_encoder", None))
-        + _count(getattr(model, "ptm_seq_ln", None))
-        + _count(getattr(model, "ptm_encoder", None))
-        + _count(getattr(model, "ptm_emb_ln", None)),
-        "HC Encoder": _count(getattr(model, "handcrafted_encoder", None)),
-        "Temporal Fusion": _count(getattr(model, "fusion", None)),
-        "Speaker Backbone": _count(getattr(model, "hc_backbone", None)) + _count(getattr(model, "backbone", None)),
-    }
-
-    print("\n[Trainable Params by Group]")
-    for name, count in groups.items():
-        print(f"  - {name:<18}: {count:,}")
-
-
-def _build_optimizer_and_scheduler(args, model, criterion, stage="single"):
-    if stage == "stage2" and getattr(args, "mode", None) == 3:
-        stage2_ptm_lr_scale = float(getattr(args, "stage2_ptm_lr_scale", 0.35))
-        stage2_ptm_lr_scale = max(0.0, stage2_ptm_lr_scale)
-
-        ptm_params = []
-        if hasattr(model, "ptm_encoder"):
-            ptm_params.extend([p for p in model.ptm_encoder.parameters() if p.requires_grad])
-        if hasattr(model, "ptm_temporal_encoder"):
-            ptm_params.extend([p for p in model.ptm_temporal_encoder.parameters() if p.requires_grad])
-        if hasattr(model, "ptm_emb_ln"):
-            ptm_params.extend([p for p in model.ptm_emb_ln.parameters() if p.requires_grad])
-        if hasattr(model, "ptm_seq_ln"):
-            ptm_params.extend([p for p in model.ptm_seq_ln.parameters() if p.requires_grad])
-
-        ptm_ids = {id(p) for p in ptm_params}
-        other_model_params = [
-            p for p in model.parameters()
-            if p.requires_grad and id(p) not in ptm_ids
-        ]
-        criterion_params = [p for p in criterion.parameters() if p.requires_grad]
-
-        param_groups = []
-        if len(other_model_params) > 0:
-            param_groups.append({"params": other_model_params, "lr": args.learning_rate})
-        if len(ptm_params) > 0:
-            param_groups.append({"params": ptm_params, "lr": args.learning_rate * stage2_ptm_lr_scale})
-        if len(criterion_params) > 0:
-            param_groups.append({"params": criterion_params, "lr": args.learning_rate})
-    else:
-        params = [p for p in model.parameters() if p.requires_grad] + [
-            p for p in criterion.parameters() if p.requires_grad
-        ]
-        param_groups = params
-
-    if args.optimizer.lower() == "adam":
-        optimizer = optim.AdamW(param_groups, lr=args.learning_rate, weight_decay=args.weight_decay)
-    elif args.optimizer.lower() == "sgd":
-        optimizer = optim.SGD(
-            param_groups,
-            lr=args.learning_rate,
-            momentum=MOMENTUM,
-            nesterov=NESTEROV,
-            weight_decay=args.weight_decay,
-        )
-    else:
-        raise ValueError(f"Unknown optimizer: {args.optimizer}")
-
-    if args.lr_scheduler.lower() == "cosine":
-        scheduler = CosineAnnealingLR(optimizer, T_max=COSINE_T_MAX, eta_min=MIN_LEARNING_RATE)
-    elif args.lr_scheduler.lower() == "plateau":
-        scheduler_patience = int(getattr(args, "lr_scheduler_patience", PLATEAU_PATIENCE))
-        scheduler = ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=PLATEAU_FACTOR,
-            patience=scheduler_patience,
-        )
-    else:
-        raise ValueError(f"Unknown scheduler: {args.lr_scheduler}")
-
-    return optimizer, scheduler
 
 
 def train_epoch(
@@ -1392,8 +1181,7 @@ def train(args):
             args.val_batch_size = int(target_val_bs)
     
     # Create experiment directory
-    experiments_dirname = getattr(args, "experiments_dirname", "experiments")
-    exp_dir = os.path.join(args.output_dir, experiments_dirname, args.exp_name)
+    exp_dir = os.path.join(args.output_dir, "experiments", args.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
     # Khởi tạo TensorBoard Writer
@@ -1438,16 +1226,8 @@ def train(args):
     print(f"{'Mixed Precision':<30} {use_mixed_precision}")
     print(f"\n{'Early Stop Patience':<30} {args.early_stop_patience}")
     print(f"{'LR Scheduler':<30} {args.lr_scheduler}")
-    print(f"{'AAM Margin':<30} {args.aam_margin}")
-    print(f"{'AAM Scale':<30} {args.aam_scale}")
-    print(f"{'Branch Dropout (Mode3)':<30} {getattr(args, 'branch_dropout_prob', 0.0) if args.mode == 3 else 'N/A'}")
-    print(f"{'Use 2-Stage FT (Mode3)':<30} {getattr(args, 'use_two_stage_ft', False) if args.mode == 3 else 'N/A'}")
-    print(f"{'Stage1 Epochs':<30} {getattr(args, 'stage1_epochs', 0) if args.mode == 3 else 'N/A'}")
-    print(f"{'Stage2 PTM LR Scale':<30} {getattr(args, 'stage2_ptm_lr_scale', 0.35) if args.mode == 3 else 'N/A'}")
-    print(f"{'Mode3 Warm-start':<30} {getattr(args, 'use_mode3_warmstart', True) if args.mode == 3 else 'N/A'}")
-    print(f"{'Mode3 PTM Residual Alpha':<30} {getattr(args, 'mode3_ptm_residual_alpha', 0.0) if args.mode == 3 else 'N/A'}")
-    print(f"{'Freeze PTM Extractor':<30} {getattr(args, 'freeze_ptm_extractor', int(args.mode) == 3) if args.mode == 3 else 'N/A'}")
-    print(f"{'Train PTM Layer Fusion':<30} {getattr(args, 'train_mode3_ptm_layer_fusion', True) if args.mode == 3 else 'N/A'}")
+    print(f"{'AAM Margin':<30} {AAM_MARGIN}")
+    print(f"{'AAM Scale':<30} {AAM_SCALE}")
     print(f"\n{'Experiment Dir':<30} {exp_dir}")
     print("="*80 + "\n")
 
@@ -1461,13 +1241,7 @@ def train(args):
         print(f"{'Utterances per Speaker':<30} {utt_per_speaker}")
     print(f"{'Hard Negative Mining':<30} {HARD_NEGATIVE_MINING}")
     print(f"{'Hard Neg Weight/TopK':<30} {HARD_NEGATIVE_WEIGHT} / {HARD_NEGATIVE_TOPK}")
-    augment_prob = float(getattr(args, 'augment_prob', AUGMENT_PROB))
-    feature_noise_std = float(getattr(args, 'feature_noise_std', FEATURE_NOISE_STD))
-    embedding_noise_std = float(getattr(args, 'embedding_noise_std', EMBEDDING_NOISE_STD))
-
-    print(f"{'Augment Prob':<30} {augment_prob}")
-    print(f"{'Feature Noise Std':<30} {feature_noise_std}")
-    print(f"{'Embedding Noise Std':<30} {embedding_noise_std}")
+    print(f"{'Augment Prob':<30} {AUGMENT_PROB}")
 
     val_batch_size = int(getattr(args, "val_batch_size", 8 if int(args.mode) == 3 else 32))
     if int(args.mode) == 1 and val_batch_size > 8:
@@ -1523,28 +1297,10 @@ def train(args):
         "device": str(device),
         "duration": getattr(args, 'duration', 'unknown'),
         "pretrained_model": getattr(args, 'pretrained_model', 'N/A'),
-        "ptm_input_source": ptm_input_source,
-        "embedding_path": getattr(args, 'embedding_path', ''),
-        "use_ptm_on_the_fly": bool(getattr(args, 'use_ptm_on_the_fly', False)),
-        "ptm_model_id": getattr(args, 'ptm_model_id', 'facebook/wav2vec2-base'),
-        "audio_base_dir": getattr(args, 'audio_base_dir', ''),
-        "audio_sample_rate": int(getattr(args, 'audio_sample_rate', 16000)),
-        "max_audio_seconds": float(getattr(args, 'max_audio_seconds', 8.0)),
-        "experiments_dirname": experiments_dirname,
         "mode": args.mode,
         "fusion_method": getattr(args, 'fusion_method', 'N/A'),
         "feature_mode": args.feature_mode,
         "use_gating": getattr(args, 'use_gating', False),
-        "branch_dropout_prob": float(getattr(args, 'branch_dropout_prob', 0.0)),
-        "use_two_stage_ft": bool(getattr(args, 'use_two_stage_ft', False)),
-        "stage1_epochs": int(getattr(args, 'stage1_epochs', 0)),
-        "stage2_ptm_lr_scale": float(getattr(args, 'stage2_ptm_lr_scale', 0.35)),
-        "use_mode3_warmstart": bool(getattr(args, 'use_mode3_warmstart', True)),
-        "use_mode3_init_mode1": bool(getattr(args, 'use_mode3_init_mode1', True)),
-        "use_mode3_init_mode2": bool(getattr(args, 'use_mode3_init_mode2', True)),
-        "mode3_ptm_residual_alpha": float(getattr(args, 'mode3_ptm_residual_alpha', 0.0)),
-        "freeze_ptm_extractor": bool(getattr(args, 'freeze_ptm_extractor', int(args.mode) == 3)),
-        "train_mode3_ptm_layer_fusion": bool(getattr(args, 'train_mode3_ptm_layer_fusion', True)),
         "use_augment": getattr(args, 'use_augment', False),
         "use_speaker_balanced_sampler": use_speaker_balanced_sampler,
         "speakers_per_batch": speakers_per_batch,
@@ -1553,9 +1309,9 @@ def train(args):
         "hard_negative_topk": HARD_NEGATIVE_TOPK,
         "hard_negative_weight": HARD_NEGATIVE_WEIGHT,
         "hard_negative_margin": HARD_NEGATIVE_MARGIN,
-        "augment_prob": augment_prob,
-        "feature_noise_std": feature_noise_std,
-        "embedding_noise_std": embedding_noise_std,
+        "augment_prob": AUGMENT_PROB,
+        "feature_noise_std": FEATURE_NOISE_STD,
+        "embedding_noise_std": EMBEDDING_NOISE_STD,
         "learning_rate": args.learning_rate,
         "optimizer": args.optimizer,
         "batch_size": args.batch_size,
@@ -1573,8 +1329,8 @@ def train(args):
         "val_max_pos_pairs": val_max_pos_pairs,
         "early_stop_patience": args.early_stop_patience,
         "lr_scheduler": args.lr_scheduler,
-        "aam_margin": float(args.aam_margin),
-        "aam_scale": float(args.aam_scale),
+        "aam_margin": AAM_MARGIN,
+        "aam_scale": AAM_SCALE,
     }
     with open(os.path.join(exp_dir, "config.json"), "w") as f:
         json.dump(config_snapshot, f, indent=2)
@@ -1615,12 +1371,7 @@ def train(args):
         mode=args.mode,
         fusion_method=args.fusion_method,
         feature_mode=args.feature_mode,
-        use_gating=args.use_gating,
-        branch_dropout_prob=float(getattr(args, 'branch_dropout_prob', 0.0)),
-        mode3_ptm_residual_alpha=float(getattr(args, 'mode3_ptm_residual_alpha', 0.0)),
-        use_ptm_on_the_fly=bool(getattr(args, 'use_ptm_on_the_fly', False)),
-        ptm_model_id=str(getattr(args, 'ptm_model_id', 'facebook/wav2vec2-base')),
-        ptm_sample_rate=int(getattr(args, 'audio_sample_rate', 16000)),
+        use_gating=args.use_gating
     )
 
     # Stage A -> Stage B warm-start (best-effort)
@@ -1674,59 +1425,38 @@ def train(args):
             print(f"⚠ Could not save model summary: {e}")
 
     # Loss and optimizer
-    criterion = AAMSoftmaxLoss(
-        num_speakers=num_speakers,
-        embedding_dim=args.embedding_dim,
-        margin=float(args.aam_margin),
-        scale=float(args.aam_scale),
-    )
+    criterion = AAMSoftmaxLoss(num_speakers=num_speakers, embedding_dim=args.embedding_dim)
     criterion = criterion.to(device)
 
-    freeze_ptm_extractor = bool(getattr(args, "freeze_ptm_extractor", int(args.mode) == 3))
-    train_mode3_ptm_layer_fusion = bool(getattr(args, "train_mode3_ptm_layer_fusion", True))
-
-    if int(args.mode) == 3:
-        _apply_mode3_ptm_trainability_policy(
-            model=model,
-            freeze_ptm_extractor=freeze_ptm_extractor,
-            train_mode3_ptm_layer_fusion=train_mode3_ptm_layer_fusion,
+    if args.optimizer.lower() == "adam":
+        params = list(model.parameters()) + list(criterion.parameters())
+        opt = optim.AdamW(
+            params, lr=args.learning_rate, weight_decay=args.weight_decay
         )
-        _print_mode3_trainable_group_summary(model)
-
-    model_stats = _count_params_and_memory(model)
-
-    profile_batch = None
-    try:
-        profile_batch = next(iter(train_loader))
-    except Exception:
-        profile_batch = None
-    gflops_per_sample = _profile_gflops_per_sample(
-        model=model,
-        criterion=criterion,
-        batch_data=profile_batch,
-        device=device,
-        use_mixed_precision=use_mixed_precision,
-    )
-    if gflops_per_sample > 0:
-        print(f"[PROFILE] Estimated GFLOPs/sample (actual batch profiler): {gflops_per_sample:.4f}")
+    elif args.optimizer.lower() == "sgd":
+        params = list(model.parameters()) + list(criterion.parameters())
+        opt = optim.SGD(
+            params,
+            lr=args.learning_rate,
+            momentum=MOMENTUM,
+            nesterov=NESTEROV,
+            weight_decay=args.weight_decay,
+        )
     else:
-        print("[PROFILE] GFLOPs/sample profiler unavailable -> fallback to 0.0")
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
-    use_two_stage_ft = bool(getattr(args, "use_two_stage_ft", False)) and int(args.mode) == 3
-    stage1_epochs = max(0, int(getattr(args, "stage1_epochs", 0)))
-
-    if use_two_stage_ft and stage1_epochs > 0:
-        if train_mode3_ptm_layer_fusion:
-            print(f"✓ 2-stage FT enabled | Stage1 keeps PTM layer fusion trainable for {stage1_epochs} epochs")
-        else:
-            print(f"✓ 2-stage FT enabled | Stage1 freeze PTM layer fusion for {stage1_epochs} epochs")
-            _set_module_trainable(getattr(model, "ptm_encoder", None), False)
-            _set_module_trainable(getattr(model, "ptm_temporal_encoder", None), False)
-            _set_module_trainable(getattr(model, "ptm_emb_ln", None), False)
-            _set_module_trainable(getattr(model, "ptm_seq_ln", None), False)
-
-    # Loss and optimizer
-    opt, scheduler = _build_optimizer_and_scheduler(args, model, criterion, stage="stage1" if (use_two_stage_ft and stage1_epochs > 0) else "single")
+    # Learning rate scheduler
+    if args.lr_scheduler.lower() == "cosine":
+        scheduler = CosineAnnealingLR(opt, T_max=COSINE_T_MAX, eta_min=MIN_LEARNING_RATE)
+    elif args.lr_scheduler.lower() == "plateau":
+        scheduler = ReduceLROnPlateau(
+            opt,
+            mode="min",
+            factor=PLATEAU_FACTOR,
+            patience=PLATEAU_PATIENCE,
+        )
+    else:
+        raise ValueError(f"Unknown scheduler: {args.lr_scheduler}")
 
     # Mixed precision
     scaler = GradScaler('cuda') if (use_mixed_precision and str(device).startswith("cuda")) else None
@@ -1741,8 +1471,7 @@ def train(args):
         f.write(json.dumps(config_snapshot, indent=2) + "\n\n")
 
     # Training loop
-    best_val_eer_global = float("inf")
-    best_val_mindcf_global = float("inf")
+    best_val_eer = float("inf") 
     
     training_history = {
         "train_loss": [], "train_accuracy": [],
@@ -1771,31 +1500,6 @@ def train(args):
 
     print("Starting training...\n")
     for epoch in range(args.num_epochs):
-        epoch_start_time = time.perf_counter()
-        if use_two_stage_ft and stage1_epochs > 0 and epoch == stage1_epochs:
-            print("\n[2-Stage FT] Switching to Stage 2: unfreeze PTM branch and rebuild optimizer/scheduler...")
-            if not train_mode3_ptm_layer_fusion:
-                _set_module_trainable(getattr(model, "ptm_encoder", None), True)
-                _set_module_trainable(getattr(model, "ptm_temporal_encoder", None), True)
-                _set_module_trainable(getattr(model, "ptm_emb_ln", None), True)
-                _set_module_trainable(getattr(model, "ptm_seq_ln", None), True)
-
-            _apply_mode3_ptm_trainability_policy(
-                model=model,
-                freeze_ptm_extractor=freeze_ptm_extractor,
-                train_mode3_ptm_layer_fusion=train_mode3_ptm_layer_fusion,
-            )
-            _print_mode3_trainable_group_summary(model)
-            opt, scheduler = _build_optimizer_and_scheduler(args, model, criterion, stage="stage2")
-            if use_mixed_precision:
-                scaler = GradScaler('cuda')
-            # Chỉ reset counter cho stage mới, nhưng giữ ngưỡng best toàn cục
-            # để không "dễ dãi" hơn stage 1 và tránh ghi đè best checkpoint bởi EER tệ hơn.
-            baseline_eer = None if best_val_eer_global == float("inf") else best_val_eer_global
-            early_stopping.reset(best_value=baseline_eer)
-            if baseline_eer is not None:
-                print(f"[2-Stage FT] Keep global-best baseline for early-stop/checkpoint: EER={baseline_eer:.4f}%")
-
         #current_margin = update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=5)
         #print(f"\n[Info] Epoch {epoch + 1}: AAM-Softmax Margin set to {current_margin:.4f}")
         
@@ -1804,9 +1508,9 @@ def train(args):
         train_loss, train_acc = train_epoch(
             model, train_loader, opt, criterion, scaler, epoch, device,
             use_augment=getattr(args, 'use_augment', False),
-            augment_prob=augment_prob,
-            feature_noise_std=feature_noise_std,
-            embedding_noise_std=embedding_noise_std,
+            augment_prob=AUGMENT_PROB,
+            feature_noise_std=FEATURE_NOISE_STD,
+            embedding_noise_std=EMBEDDING_NOISE_STD,
             hard_negative_mining=HARD_NEGATIVE_MINING,
             hard_negative_topk=HARD_NEGATIVE_TOPK,
             hard_negative_weight=HARD_NEGATIVE_WEIGHT,
@@ -1867,12 +1571,11 @@ def train(args):
             f.write(log_msg + "\n")
 
         # ĐIỂM CỐT LÕI: Save checkpoint dựa trên EER thay vì Loss
-        if should_validate and val_eer < best_val_eer_global:
-            best_val_eer_global = val_eer
-            best_val_mindcf_global = val_mindcf
+        if val_eer < best_val_eer:
+            best_val_eer = val_eer
             checkpoint_path = os.path.join(CHECKPOINT_DIR, BEST_MODEL_NAME)
             # Tái sử dụng hàm save (vẫn lưu best_val_eer vào field best_loss cho tương thích)
-            save_checkpoint(model, opt, epoch, best_val_eer_global, checkpoint_path)
+            save_checkpoint(model, opt, epoch, best_val_eer, checkpoint_path)
             shutil.copy(checkpoint_path, os.path.join(exp_dir, BEST_MODEL_NAME))
 
         # Early stopping (bây giờ sẽ ngừng train nếu EER không giảm)
@@ -1886,7 +1589,7 @@ def train(args):
 
     # Save final model
     final_path = os.path.join(CHECKPOINT_DIR, FINAL_MODEL_NAME)
-    save_checkpoint(model, opt, epoch, best_val_eer_global, final_path)
+    save_checkpoint(model, opt, epoch, best_val_eer, final_path)
     shutil.copy(final_path, os.path.join(exp_dir, FINAL_MODEL_NAME))
 
     # Save history
@@ -1919,8 +1622,8 @@ def train(args):
         "exp_name": args.exp_name,
         "timestamp": datetime.now().isoformat(),
         "config": config_snapshot,
-        "best_val_eer": float(best_val_eer_global), 
-        "best_val_mindcf": float(best_val_mindcf_global),
+        "best_val_eer": float(best_val_eer), 
+        "best_val_mindcf": float(training_history["val_mindcf"][training_history["val_eer"].index(best_val_eer)]),
         "final_train_loss": float(training_history["train_loss"][-1]),
         "final_train_accuracy": float(training_history["train_accuracy"][-1]),
         "epochs_trained": epochs_trained,
@@ -1954,7 +1657,7 @@ def train(args):
     summary_json_path, summary_csv_path = _update_experiment_mode_summary(experiment_root, final_results, exp_dir)
 
     print(f"\n✓ Training completed!")
-    print(f"  Best validation EER: {best_val_eer_global:.4f}")
+    print(f"  Best validation EER: {best_val_eer:.4f}")
     print(f"  Experiment dir: {exp_dir}")
     print(f"  Config: {os.path.join(exp_dir, 'config.json')}")
     print(f"  Results: {os.path.join(exp_dir, 'results.json')}")
