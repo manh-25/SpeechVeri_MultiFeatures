@@ -494,13 +494,6 @@ def try_initialize_mode3_from_stageA(model, args, device, exp_dir):
             # Mode3 PTM branch may not have a backbone (e.g., PTM head only)
             mapped_sd = stageA_sd
 
-        # Newer Mode3 uses temporal PTM encoder; remap compatible Mode1 PTM keys.
-        mapped_sd = _augment_mode1_to_mode3_temporal_mapping(
-            model=model,
-            stageA_state_dict=stageA_sd,
-            mapped_sd=mapped_sd,
-        )
-
         incompatible = model.load_state_dict(mapped_sd, strict=False)
         init_report["loaded"]["mode1"] = True
         init_report["mode1_incompatible_keys"] = {
@@ -1242,54 +1235,6 @@ def train(args):
     print(f"{'Hard Negative Mining':<30} {HARD_NEGATIVE_MINING}")
     print(f"{'Hard Neg Weight/TopK':<30} {HARD_NEGATIVE_WEIGHT} / {HARD_NEGATIVE_TOPK}")
     print(f"{'Augment Prob':<30} {AUGMENT_PROB}")
-
-    val_batch_size = int(getattr(args, "val_batch_size", 8 if int(args.mode) == 3 else 32))
-    if int(args.mode) == 1 and val_batch_size > 8:
-        print(f"[SAFE-VAL] Clamp Mode1 val_batch_size: {val_batch_size} -> 8")
-        val_batch_size = 8
-    if hasattr(args, "num_workers"):
-        num_workers = int(getattr(args, "num_workers", 0))
-    else:
-        num_workers = 1 if os.name == "nt" else max(2, min(8, (os.cpu_count() or 4) // 2))
-
-    # Windows + notebook + giant PTM shards can easily kill multi-process workers.
-    # Keep workers conservative for Mode 1/3 unless user explicitly overrides via env.
-    if os.name == "nt" and int(args.mode) in [1, 3]:
-        win_worker_cap = int(getattr(args, "win_mode13_max_workers", os.getenv("SV_WIN_MODE13_MAX_WORKERS", "1")))
-        if win_worker_cap < 0:
-            win_worker_cap = 0
-        if num_workers > win_worker_cap:
-            print(f"[SAFE-LOADER] Clamp num_workers on Windows Mode{int(args.mode)}: {num_workers} -> {win_worker_cap}")
-            num_workers = win_worker_cap
-
-    pin_memory = bool(getattr(args, "pin_memory", torch.cuda.is_available()))
-    persistent_workers = bool(getattr(args, "persistent_workers", num_workers > 0))
-    prefetch_factor = int(getattr(args, "prefetch_factor", 2))
-    validate_every = max(1, int(getattr(args, "validate_every", 1)))
-    max_train_steps_per_epoch = int(getattr(args, "max_train_steps_per_epoch", 0))
-    if max_train_steps_per_epoch <= 0:
-        max_train_steps_per_epoch = None
-    train_subset_fraction = float(getattr(args, "train_subset_fraction", 1.0))
-    if train_subset_fraction <= 0.0 or train_subset_fraction > 1.0:
-        train_subset_fraction = 1.0
-    max_train_samples = int(getattr(args, "max_train_samples", 0))
-    if max_train_samples < 0:
-        max_train_samples = 0
-    val_max_pos_pairs = max(1000, int(getattr(args, "val_max_pos_pairs", 5000)))
-    non_blocking_transfer = bool(getattr(args, "non_blocking_transfer", torch.cuda.is_available()))
-
-    print(f"{'Validation Batch Size':<30} {val_batch_size}")
-    print(f"{'Num Workers':<30} {num_workers}")
-    if os.name == "nt" and num_workers == 0:
-        print(f"{'Loader Stability Mode':<30} Windows-safe (single worker)")
-    print(f"{'Pin Memory':<30} {pin_memory}")
-    print(f"{'Persistent Workers':<30} {persistent_workers if num_workers > 0 else False}")
-    print(f"{'Prefetch Factor':<30} {prefetch_factor if num_workers > 0 else 'N/A'}")
-    print(f"{'Validate Every (epochs)':<30} {validate_every}")
-    print(f"{'Max Train Steps/Epoch':<30} {max_train_steps_per_epoch if max_train_steps_per_epoch is not None else 'Full'}")
-    print(f"{'Train Subset Fraction':<30} {train_subset_fraction:.3f}")
-    print(f"{'Max Train Samples':<30} {max_train_samples if max_train_samples > 0 else 'All'}")
-    print(f"{'Val Max Pos Pairs':<30} {val_max_pos_pairs}")
 
     config_snapshot = {
         "exp_name": args.exp_name,
