@@ -1,0 +1,4 @@
+TestSet,Experiment,Mode,Fusion,Feature,PTM,Duration,PTM_Input_Mode,EER (%),MinDCF,Used Pairs,Missing Pairs,Best Val EER
+test_vi,Mode3_film_train_raw_wav2vec2_mfcc_pitch,3,film,mfcc_pitch,wav2vec2,train_raw,on_the_fly,3.929094512074309,0.2583958489272432,9895,0,9.440000000000001
+test_vi,Mode3_gating_train_raw_wav2vec2_mfbe_only,3,gating,mfbe_only,wav2vec2,train_raw,on_the_fly,3.969672980409604,0.2666085774654949,9895,0,
+test_vi,Mode3_cross_attention_train_raw_wav2vec2_fbank_pitch,3,cross_attention,fbank_pitch,wav2vec2,train_raw,on_the_fly,4.815108505073529,0.28185106530348125,9895,0,8.56

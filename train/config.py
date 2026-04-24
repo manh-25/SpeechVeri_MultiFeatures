@@ -17,7 +17,7 @@ MODE = 1
 # Fusion method for MODE 3: "concat", "cross_attention", or "gating"
 FUSION_METHOD = "gating"
 
-# Feature mode for handcrafted features: "mfbe_pitch", "mfcc_pitch", "mfbe_only", "mfcc_only", "pitch_only"
+# Feature mode for handcrafted features: "mfbe_pitch", "mfcc_pitch", "fbank_pitch", "mfbe_only", "mfcc_only", "fbank_only", "pitch_only"
 FEATURE_MODE = "mfbe_pitch" 
 
 # 2. Định nghĩa mapping kích thước
@@ -25,8 +25,10 @@ FEATURE_MODE = "mfbe_pitch"
 DIM_MAP = {
     "mfbe_pitch": 80 + 1,  # 81
     "mfcc_pitch": 40 + 1,  # 41
+    "fbank_pitch": 80 + 1, # 81
     "mfbe_only": 80,
     "mfcc_only": 40,
+    "fbank_only": 80,
     "pitch_only": 1
 }
 

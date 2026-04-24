@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from transformers import AutoFeatureExtractor, AutoModel
 from config import (
     PTM_DIM,
     PTM_NUM_LAYERS,
@@ -89,11 +90,133 @@ class PTMEmbeddingHead(nn.Module):
             nn.LayerNorm(embedding_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, D)
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None) -> torch.Tensor:
+        # x: (B, L, D) hoặc (B, L, T, D)
+        if x.dim() == 4:
+            bsz, _, t_steps, _ = x.shape
+            if lengths is None:
+                lengths = torch.full((bsz,), t_steps, dtype=torch.long, device=x.device)
+            else:
+                lengths = lengths.to(x.device).long().clamp(min=1, max=t_steps)
+
+            time_index = torch.arange(t_steps, device=x.device).view(1, 1, t_steps, 1)
+            valid_mask = (time_index < lengths.view(-1, 1, 1, 1)).to(dtype=x.dtype)
+            denom = lengths.view(-1, 1, 1).to(dtype=x.dtype).clamp_min(1.0)
+            x = (x * valid_mask).sum(dim=2) / denom  # (B, L, D)
+
         pooled = self.pool(x)
         pooled = self.in_norm(pooled)
         return self.proj(pooled)
+
+
+class TemporalPTMEncoder(nn.Module):
+    """Keep PTM time axis and pool only across PTM layers per frame."""
+
+    def __init__(self, ptm_dim: int = PTM_DIM):
+        super().__init__()
+        self.layer_pool = LayerAttentionPooling(dim=ptm_dim)
+        self.out_norm = nn.LayerNorm(ptm_dim)
+
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor | None = None):
+        # x: (B, L, D) or (B, L, T, D)
+        if x.dim() == 3:
+            x = x.unsqueeze(2)
+
+        if x.dim() != 4:
+            raise ValueError(f"PTM temporal input must be 3D/4D, got shape={tuple(x.shape)}")
+
+        bsz, num_layers, t_steps, dim = x.shape
+        if num_layers <= 0 or t_steps <= 0 or dim <= 0:
+            raise ValueError(f"Invalid PTM temporal shape: {tuple(x.shape)}")
+
+        if lengths is None:
+            lengths = torch.full((bsz,), t_steps, dtype=torch.long, device=x.device)
+        else:
+            lengths = lengths.to(x.device).long().clamp(min=1, max=t_steps)
+
+        # Pool across layer dimension for each time step.
+        x_t = x.permute(0, 2, 1, 3).contiguous()  # (B, T, L, D)
+        x_t = x_t.view(bsz * t_steps, num_layers, dim)
+        pooled = self.layer_pool(x_t)  # (B*T, D)
+        pooled = pooled.view(bsz, t_steps, dim)
+        pooled = self.out_norm(pooled)
+        return pooled, lengths
+
+
+class PTMOnTheFlyExtractor(nn.Module):
+    """Runtime PTM extractor from raw waveform.
+
+    Input:
+        audio: (B, T) float waveform
+        audio_lengths: (B,) valid samples in each waveform
+
+    Output:
+        hidden_stack: (B, L, T', D)
+        frame_lengths: (B,) valid frames in T'
+    """
+
+    def __init__(self, model_id: str, sample_rate: int = 16000, max_layers: int = PTM_NUM_LAYERS):
+        super().__init__()
+        self.model_id = str(model_id)
+        self.sample_rate = int(sample_rate)
+        self.max_layers = int(max_layers)
+
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained(self.model_id)
+        self.model = AutoModel.from_pretrained(self.model_id)
+
+        # Runtime extraction in this project is often frozen in Mode 3.
+        # Disable HF gradient checkpointing by default to avoid warning/overhead
+        # when no PTM params require gradients.
+        if hasattr(self.model, "gradient_checkpointing_disable"):
+            try:
+                self.model.gradient_checkpointing_disable()
+            except Exception:
+                pass
+
+        self.expected_sample_rate = int(getattr(self.feature_extractor, "sampling_rate", self.sample_rate))
+
+    def forward(self, audio: torch.Tensor, audio_lengths: torch.Tensor | None = None):
+        if audio.dim() != 2:
+            raise ValueError(f"On-the-fly audio must be (B, T), got {tuple(audio.shape)}")
+
+        bsz, total_samples = audio.shape
+        if total_samples <= 0:
+            raise ValueError("Audio input has zero samples.")
+
+        if audio_lengths is None:
+            audio_lengths = torch.full((bsz,), total_samples, dtype=torch.long, device=audio.device)
+        else:
+            audio_lengths = audio_lengths.to(audio.device).long().clamp(min=1, max=total_samples)
+
+        attn_mask = torch.arange(total_samples, device=audio.device).view(1, total_samples)
+        attn_mask = (attn_mask < audio_lengths.view(-1, 1)).long()
+
+        # If extractor is frozen, avoid storing activations for backward.
+        trainable = any(p.requires_grad for p in self.model.parameters())
+        if not trainable and hasattr(self.model, "gradient_checkpointing_disable"):
+            try:
+                self.model.gradient_checkpointing_disable()
+            except Exception:
+                pass
+        with torch.set_grad_enabled(trainable and self.training):
+            outputs = self.model(
+                input_values=audio,
+                attention_mask=attn_mask,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+
+        hidden_states = outputs.hidden_states
+        if hidden_states is None or len(hidden_states) == 0:
+            raise RuntimeError("PTM runtime extractor did not return hidden_states.")
+
+        selected = list(hidden_states[-self.max_layers:])
+        hidden_stack = torch.stack(selected, dim=1)  # (B, L, T', D)
+
+        out_t = int(hidden_stack.size(2))
+        ratios = audio_lengths.float() / float(total_samples)
+        frame_lengths = torch.clamp((ratios * out_t).floor().long(), min=1, max=out_t)
+        return hidden_stack, frame_lengths
 
 
 # ============================================================================
@@ -277,6 +400,102 @@ class EmbeddingFiLMFusion(nn.Module):
         hc_mod = hc_emb * (1.0 + gamma) + beta
         return self.out_ln(hc_mod + ptm_emb)
 
+
+class TemporalConcatFusion(nn.Module):
+    """Temporal concat fusion on (B, T, D)."""
+
+    def __init__(self, dim: int = PTM_DIM):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(dim * 2, dim),
+            nn.ReLU(),
+            nn.LayerNorm(dim),
+        )
+
+    def forward(self, ptm_seq: torch.Tensor, hc_seq: torch.Tensor):
+        return self.proj(torch.cat([ptm_seq, hc_seq], dim=-1))
+
+
+class TemporalGatingFusion(nn.Module):
+    """Temporal gating fusion on (B, T, D)."""
+
+    def __init__(self, dim: int = PTM_DIM):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(dim * 2, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, ptm_seq: torch.Tensor, hc_seq: torch.Tensor, return_gate: bool = False):
+        gate = self.gate(torch.cat([ptm_seq, hc_seq], dim=-1))
+        fused = gate * ptm_seq + (1.0 - gate) * hc_seq
+        if return_gate:
+            return fused, gate
+        return fused
+
+
+class TemporalFiLMFusion(nn.Module):
+    """Temporal FiLM: PTM conditions HC frame-wise, then residual merge."""
+
+    def __init__(self, dim: int = PTM_DIM):
+        super().__init__()
+        self.to_gamma_beta = nn.Linear(dim, dim * 2)
+        self.out_ln = nn.LayerNorm(dim)
+
+    def forward(self, ptm_seq: torch.Tensor, hc_seq: torch.Tensor):
+        gamma, beta = self.to_gamma_beta(ptm_seq).chunk(2, dim=-1)
+        gamma = torch.tanh(gamma)
+        hc_mod = hc_seq * (1.0 + gamma) + beta
+        return self.out_ln(hc_mod + ptm_seq)
+
+
+class TemporalCrossAttentionFusion(nn.Module):
+    """Temporal cross-attention: PTM queries HC, then residual + norm."""
+
+    def __init__(self, dim: int = PTM_DIM, num_heads: int = 8):
+        super().__init__()
+        assert dim % num_heads == 0, "dim must be divisible by num_heads"
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
+        self.out_ln = nn.LayerNorm(dim)
+
+    def forward(self, ptm_seq: torch.Tensor, hc_seq: torch.Tensor):
+        attn_out, _ = self.attn(query=ptm_seq, key=hc_seq, value=hc_seq)
+        return self.out_ln(attn_out + ptm_seq)
+
+
+class TemporalAttentivePoolingHead(nn.Module):
+    """Light attentive pooling over time then MLP projection to speaker embedding."""
+
+    def __init__(self, input_dim: int = PTM_DIM, embedding_dim: int = EMBEDDING_DIM, hidden_dim: int = 256):
+        super().__init__()
+        self.score = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(input_dim, embedding_dim),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim),
+        )
+
+    def forward(self, seq: torch.Tensor, lengths: torch.Tensor | None = None):
+        # seq: (B, T, D)
+        bsz, t_steps, _ = seq.shape
+        logits = self.score(seq).squeeze(-1)  # (B, T)
+
+        if lengths is not None:
+            lengths = lengths.to(seq.device).long().clamp(min=1, max=t_steps)
+            time_index = torch.arange(t_steps, device=seq.device).view(1, t_steps)
+            valid = time_index < lengths.view(-1, 1)
+            logits = logits.masked_fill(~valid, -1e4)
+
+        attn = torch.softmax(logits, dim=1).unsqueeze(-1)
+        pooled = (seq * attn).sum(dim=1)
+        return self.proj(pooled)
+
 # ============================================================================
 # SQUEEZE-AND-EXCITATION & ASP POOLING
 # ============================================================================
@@ -446,7 +665,19 @@ class ECAPATDNN(nn.Module):
 class SpeakerVerificationModel(nn.Module):
     """Complete speaker verification model"""
 
-    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=False, branch_dropout_prob: float = 0.0):
+    def __init__(
+        self,
+        num_speakers,
+        mode=MODE,
+        fusion_method=FUSION_METHOD,
+        feature_mode="mfbe_pitch",
+        use_gating=False,
+        branch_dropout_prob: float = 0.0,
+        mode3_ptm_residual_alpha: float = 0.0,
+        use_ptm_on_the_fly: bool = False,
+        ptm_model_id: str = "facebook/wav2vec2-base",
+        ptm_sample_rate: int = 16000,
+    ):
         super().__init__()
         self.mode = mode
         self.fusion_method = fusion_method
@@ -454,11 +685,21 @@ class SpeakerVerificationModel(nn.Module):
         self.use_gating = use_gating
         self.num_speakers = num_speakers
         self.branch_dropout_prob = float(max(0.0, min(1.0, branch_dropout_prob)))
+        self.mode3_ptm_residual_alpha = float(max(0.0, min(1.0, mode3_ptm_residual_alpha)))
+        self.use_ptm_on_the_fly = bool(use_ptm_on_the_fly)
+        self.ptm_model_id = str(ptm_model_id)
+        self.ptm_sample_rate = int(ptm_sample_rate)
 
         actual_input_dim = DIM_MAP.get(feature_mode, 81)
 
         # Mode 1: PTM only
         if mode == 1:
+            if self.use_ptm_on_the_fly:
+                self.ptm_extractor = PTMOnTheFlyExtractor(
+                    model_id=self.ptm_model_id,
+                    sample_rate=self.ptm_sample_rate,
+                    max_layers=PTM_NUM_LAYERS,
+                )
             # Option 2: attention pooling over 13 layers -> projection to 512
             self.ptm_encoder = PTMEmbeddingHead(ptm_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
             self.backbone = nn.Identity()
@@ -470,55 +711,59 @@ class SpeakerVerificationModel(nn.Module):
             )
             self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
 
-        # Mode 3: Both with fusion
+        # Mode 3: Keep temporal axis for fusion, then ECAPA encodes fused sequence
         elif mode == 3:
-            # PTM branch: same as Mode 1 (no ECAPA since PTM has no true time axis)
-            self.ptm_encoder = PTMEmbeddingHead(ptm_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
+            if self.use_ptm_on_the_fly:
+                self.ptm_extractor = PTMOnTheFlyExtractor(
+                    model_id=self.ptm_model_id,
+                    sample_rate=self.ptm_sample_rate,
+                    max_layers=PTM_NUM_LAYERS,
+                )
+            self.ptm_temporal_encoder = TemporalPTMEncoder(ptm_dim=PTM_DIM)
             self.handcrafted_encoder = HandcraftedEncoder(
                 input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
-
-            # HC branch: keep ECAPA to exploit real temporal dynamics
             self.hc_backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
 
-            # Light per-branch normalization before fusion
-            self.ptm_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
-            self.hc_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
-            self.fused_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
+            self.ptm_seq_ln = nn.LayerNorm(PTM_DIM)
+            self.hc_seq_ln = nn.LayerNorm(PTM_DIM)
 
-            # Embedding-level fusion head
             if fusion_method == "gating":
-                self.fusion = EmbeddingGatingFusion(EMBEDDING_DIM)
+                self.fusion = TemporalGatingFusion(PTM_DIM)
             elif fusion_method == "film":
-                self.fusion = EmbeddingFiLMFusion(EMBEDDING_DIM)
+                self.fusion = TemporalFiLMFusion(PTM_DIM)
             elif fusion_method == "concat":
-                self.fusion = EmbeddingConcatFusion(EMBEDDING_DIM)
+                self.fusion = TemporalConcatFusion(PTM_DIM)
             elif fusion_method == "cross_attention":
-                raise ValueError(
-                    "cross_attention has been removed for Mode 3. "
-                    "Use one of: gating, film, concat."
-                )
+                self.fusion = TemporalCrossAttentionFusion(dim=PTM_DIM, num_heads=8)
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
 
-    def _apply_mode3_branch_dropout(self, ptm_emb: torch.Tensor, hc_emb: torch.Tensor):
+    def _apply_mode3_branch_dropout(self, ptm_seq: torch.Tensor, hc_seq: torch.Tensor):
         if (not self.training) or self.branch_dropout_prob <= 0.0:
-            return ptm_emb, hc_emb
+            return ptm_seq, hc_seq
 
-        batch_size = ptm_emb.shape[0]
-        device = ptm_emb.device
+        batch_size = ptm_seq.shape[0]
+        device = ptm_seq.device
         keep_prob = 1.0 - self.branch_dropout_prob
 
-        ptm_keep = (torch.rand(batch_size, 1, device=device) < keep_prob).float()
-        hc_keep = (torch.rand(batch_size, 1, device=device) < keep_prob).float()
+        ptm_keep = (torch.rand(batch_size, 1, 1, device=device) < keep_prob).float()
+        hc_keep = (torch.rand(batch_size, 1, 1, device=device) < keep_prob).float()
 
         both_drop = (ptm_keep + hc_keep) == 0
         if both_drop.any():
-            choose_ptm = (torch.rand(batch_size, 1, device=device) < 0.5).float()
+            choose_ptm = (torch.rand(batch_size, 1, 1, device=device) < 0.5).float()
             ptm_keep = torch.where(both_drop, choose_ptm, ptm_keep)
             hc_keep = torch.where(both_drop, 1.0 - choose_ptm, hc_keep)
 
-        return ptm_emb * ptm_keep, hc_emb * hc_keep
+        return ptm_seq * ptm_keep, hc_seq * hc_keep
+
+    @staticmethod
+    def _align_hc_to_ptm_time(hc_feat: torch.Tensor, target_t: int):
+        # hc_feat: (B, D, T_hc) -> (B, T_target, D)
+        if hc_feat.size(-1) != target_t:
+            hc_feat = F.interpolate(hc_feat, size=target_t, mode="linear", align_corners=False)
+        return hc_feat.transpose(1, 2).contiguous()
        
 
     def forward(self, return_gates=False, **kwargs):
@@ -544,8 +789,17 @@ class SpeakerVerificationModel(nn.Module):
         gate_weights = None
 
         if self.mode == 1:
-            embedding = kwargs["embedding"]
-            speaker_embedding = self.ptm_encoder(embedding)  # (B, EMBEDDING_DIM)
+            if "embedding" in kwargs:
+                embedding = kwargs["embedding"]
+                embedding_lengths = kwargs.get("embedding_lengths")
+            elif self.use_ptm_on_the_fly and "audio" in kwargs:
+                embedding, embedding_lengths = self.ptm_extractor(
+                    kwargs["audio"],
+                    kwargs.get("audio_lengths"),
+                )
+            else:
+                raise KeyError("Mode1 requires 'embedding' or ('audio' with use_ptm_on_the_fly=True).")
+            speaker_embedding = self.ptm_encoder(embedding, lengths=embedding_lengths)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 2:
             feature = kwargs["feature"] # (B, C_hc, T)
@@ -555,28 +809,43 @@ class SpeakerVerificationModel(nn.Module):
             speaker_embedding = self.backbone(hc_feat)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 3:
-            embedding = kwargs["embedding"] 
-            feature = kwargs["feature"]     
-            
-            # Encode PTM to embedding directly
-            ptm_emb = self.ptm_encoder(embedding)        # (B, EMBEDDING_DIM)
-
-            # HC -> ECAPA
-            hc_feat = self.handcrafted_encoder(feature)  # (B, PTM_DIM, T)
-            hc_emb = self.hc_backbone(hc_feat)           # (B, EMBEDDING_DIM)
-
-            ptm_emb = self.ptm_emb_ln(ptm_emb)
-            hc_emb = self.hc_emb_ln(hc_emb)
-            ptm_emb, hc_emb = self._apply_mode3_branch_dropout(ptm_emb, hc_emb)
-
-            # Fuse at embedding level
-            if self.fusion_method == "gating":
-                fused_emb, gate_weights = self.fusion(ptm_emb, hc_emb, return_gate=True)
+            if "embedding" in kwargs:
+                embedding = kwargs["embedding"]
+                embedding_lengths = kwargs.get("embedding_lengths")
+            elif self.use_ptm_on_the_fly and "audio" in kwargs:
+                embedding, embedding_lengths = self.ptm_extractor(
+                    kwargs["audio"],
+                    kwargs.get("audio_lengths"),
+                )
             else:
-                fused_emb = self.fusion(ptm_emb, hc_emb)
+                raise KeyError("Mode3 requires 'embedding' or ('audio' with use_ptm_on_the_fly=True).")
+            feature = kwargs["feature"]
 
-            fused_emb = self.fused_emb_ln(fused_emb)
-            speaker_embedding = fused_emb
+            # PTM temporal stream: (B, T, D)
+            ptm_seq, _ = self.ptm_temporal_encoder(embedding, lengths=embedding_lengths)
+
+            # HC stream aligned to PTM timeline: (B, T, D)
+            hc_feat = self.handcrafted_encoder(feature)
+            hc_seq = self._align_hc_to_ptm_time(hc_feat, target_t=ptm_seq.size(1))
+
+            ptm_seq = self.ptm_seq_ln(ptm_seq)
+            hc_seq = self.hc_seq_ln(hc_seq)
+            ptm_seq, hc_seq = self._apply_mode3_branch_dropout(ptm_seq, hc_seq)
+
+            # Temporal fusion first
+            if self.fusion_method == "gating":
+                fused_seq, gate_weights = self.fusion(ptm_seq, hc_seq, return_gate=True)
+            else:
+                fused_seq = self.fusion(ptm_seq, hc_seq)
+
+            # Preserve a controlled PTM shortcut to reduce regression vs strong Mode1 baseline.
+            if self.mode3_ptm_residual_alpha > 0.0:
+                alpha = self.mode3_ptm_residual_alpha
+                fused_seq = (1.0 - alpha) * fused_seq + alpha * ptm_seq
+
+            # ECAPA expects (B, D, T)
+            fused_feat = fused_seq.transpose(1, 2).contiguous()
+            speaker_embedding = self.hc_backbone(fused_feat)
 
         speaker_embedding = F.normalize(speaker_embedding, p=2, dim=1)
 
@@ -625,7 +894,19 @@ class AAMSoftmaxLoss(nn.Module):
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=True, branch_dropout_prob: float = 0.0):
+def get_model(
+    num_speakers,
+    device="cuda",
+    mode=MODE,
+    fusion_method=FUSION_METHOD,
+    feature_mode="mfbe_pitch",
+    use_gating=True,
+    branch_dropout_prob: float = 0.0,
+    mode3_ptm_residual_alpha: float = 0.0,
+    use_ptm_on_the_fly: bool = False,
+    ptm_model_id: str = "facebook/wav2vec2-base",
+    ptm_sample_rate: int = 16000,
+):
     """
     Create and initialize model.
 
@@ -647,6 +928,10 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
         feature_mode=feature_mode,
         use_gating=use_gating,
         branch_dropout_prob=branch_dropout_prob,
+        mode3_ptm_residual_alpha=mode3_ptm_residual_alpha,
+        use_ptm_on_the_fly=bool(use_ptm_on_the_fly),
+        ptm_model_id=ptm_model_id,
+        ptm_sample_rate=int(ptm_sample_rate),
     )
     model = model.to(device)
 
@@ -658,6 +943,12 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
         print(f"  Feature mode: {feature_mode}")
         print(f"  Use gating: {use_gating}")
         print(f"  Branch dropout prob: {branch_dropout_prob}")
+        print(f"  Mode3 PTM residual alpha: {mode3_ptm_residual_alpha}")
+    if mode in [1, 3]:
+        print(f"  PTM on-the-fly: {bool(use_ptm_on_the_fly)}")
+        if bool(use_ptm_on_the_fly):
+            print(f"  PTM runtime model: {ptm_model_id}")
+            print(f"  PTM sample rate: {int(ptm_sample_rate)}")
     print(f"  Num speakers: {num_speakers}")
     print(f"  Total parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
