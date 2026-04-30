@@ -665,13 +665,26 @@ class ECAPATDNN(nn.Module):
 class SpeakerVerificationModel(nn.Module):
     """Complete speaker verification model"""
 
-    def __init__(self, num_speakers, mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=False):
+    def __init__(
+        self,
+        num_speakers,
+        mode=MODE,
+        fusion_method=FUSION_METHOD,
+        feature_mode="mfbe_pitch",
+        use_gating=False,
+        use_ptm_on_the_fly=False,
+        ptm_model_id="facebook/wav2vec2-base",
+        ptm_sample_rate=16000,
+    ):
         super().__init__()
         self.mode = mode
         self.fusion_method = fusion_method
         self.feature_mode = feature_mode
         self.use_gating = use_gating
         self.num_speakers = num_speakers
+        self.use_ptm_on_the_fly = bool(use_ptm_on_the_fly)
+        self.ptm_model_id = str(ptm_model_id)
+        self.ptm_sample_rate = int(ptm_sample_rate)
 
         actual_input_dim = DIM_MAP.get(feature_mode, 81)
 
@@ -694,7 +707,7 @@ class SpeakerVerificationModel(nn.Module):
             )
             self.backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
 
-        # Mode 3: Keep temporal axis for fusion, then ECAPA encodes fused sequence
+        # Mode 3: Both with embedding-level fusion (no PTM temporal axis)
         elif mode == 3:
             if self.use_ptm_on_the_fly:
                 self.ptm_extractor = PTMOnTheFlyExtractor(
@@ -702,23 +715,27 @@ class SpeakerVerificationModel(nn.Module):
                     sample_rate=self.ptm_sample_rate,
                     max_layers=PTM_NUM_LAYERS,
                 )
-            self.ptm_temporal_encoder = TemporalPTMEncoder(ptm_dim=PTM_DIM)
+            self.ptm_encoder = PTMEmbeddingHead(ptm_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM)
             self.handcrafted_encoder = HandcraftedEncoder(
                 input_dim=actual_input_dim, output_dim=PTM_DIM, feature_mode=feature_mode
             )
             self.hc_backbone = ECAPATDNN(input_dim=PTM_DIM, embedding_dim=EMBEDDING_DIM, use_ptm_guide=False)
 
-            self.ptm_seq_ln = nn.LayerNorm(PTM_DIM)
-            self.hc_seq_ln = nn.LayerNorm(PTM_DIM)
+            self.ptm_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
+            self.hc_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
+            self.fused_emb_ln = nn.LayerNorm(EMBEDDING_DIM)
 
             if fusion_method == "gating":
-                self.fusion = TemporalGatingFusion(PTM_DIM)
+                self.fusion = EmbeddingGatingFusion(EMBEDDING_DIM)
             elif fusion_method == "film":
-                self.fusion = TemporalFiLMFusion(PTM_DIM)
+                self.fusion = EmbeddingFiLMFusion(EMBEDDING_DIM)
             elif fusion_method == "concat":
-                self.fusion = TemporalConcatFusion(PTM_DIM)
+                self.fusion = EmbeddingConcatFusion(EMBEDDING_DIM)
             elif fusion_method == "cross_attention":
-                self.fusion = TemporalCrossAttentionFusion(dim=PTM_DIM, num_heads=8)
+                raise ValueError(
+                    "cross_attention has been removed for Mode 3. "
+                    "Use one of: gating, film, concat."
+                )
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
        
@@ -766,9 +783,18 @@ class SpeakerVerificationModel(nn.Module):
             speaker_embedding = self.backbone(hc_feat)  # (B, EMBEDDING_DIM)
 
         elif self.mode == 3:
-            embedding = kwargs["embedding"] 
-            feature = kwargs["feature"]     
-            
+            if "embedding" in kwargs:
+                embedding = kwargs["embedding"]
+            elif self.use_ptm_on_the_fly and "audio" in kwargs:
+                embedding, _ = self.ptm_extractor(
+                    kwargs["audio"],
+                    kwargs.get("audio_lengths"),
+                )
+            else:
+                raise KeyError("Mode3 requires 'embedding' or ('audio' with use_ptm_on_the_fly=True).")
+
+            feature = kwargs["feature"]
+
             # Encode PTM to embedding directly
             ptm_emb = self.ptm_encoder(embedding)        # (B, EMBEDDING_DIM)
 
@@ -783,34 +809,10 @@ class SpeakerVerificationModel(nn.Module):
             if self.fusion_method == "gating":
                 fused_emb, gate_weights = self.fusion(ptm_emb, hc_emb, return_gate=True)
             else:
-                raise KeyError("Mode3 requires 'embedding' or ('audio' with use_ptm_on_the_fly=True).")
-            feature = kwargs["feature"]
+                fused_emb = self.fusion(ptm_emb, hc_emb)
 
-            # PTM temporal stream: (B, T, D)
-            ptm_seq, _ = self.ptm_temporal_encoder(embedding, lengths=embedding_lengths)
-
-            # HC stream aligned to PTM timeline: (B, T, D)
-            hc_feat = self.handcrafted_encoder(feature)
-            hc_seq = self._align_hc_to_ptm_time(hc_feat, target_t=ptm_seq.size(1))
-
-            ptm_seq = self.ptm_seq_ln(ptm_seq)
-            hc_seq = self.hc_seq_ln(hc_seq)
-            ptm_seq, hc_seq = self._apply_mode3_branch_dropout(ptm_seq, hc_seq)
-
-            # Temporal fusion first
-            if self.fusion_method == "gating":
-                fused_seq, gate_weights = self.fusion(ptm_seq, hc_seq, return_gate=True)
-            else:
-                fused_seq = self.fusion(ptm_seq, hc_seq)
-
-            # Preserve a controlled PTM shortcut to reduce regression vs strong Mode1 baseline.
-            if self.mode3_ptm_residual_alpha > 0.0:
-                alpha = self.mode3_ptm_residual_alpha
-                fused_seq = (1.0 - alpha) * fused_seq + alpha * ptm_seq
-
-            # ECAPA expects (B, D, T)
-            fused_feat = fused_seq.transpose(1, 2).contiguous()
-            speaker_embedding = self.hc_backbone(fused_feat)
+            fused_emb = self.fused_emb_ln(fused_emb)
+            speaker_embedding = fused_emb
 
         speaker_embedding = F.normalize(speaker_embedding, p=2, dim=1)
 
@@ -859,7 +861,17 @@ class AAMSoftmaxLoss(nn.Module):
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHOD, feature_mode="mfbe_pitch", use_gating=True):
+def get_model(
+    num_speakers,
+    device="cuda",
+    mode=MODE,
+    fusion_method=FUSION_METHOD,
+    feature_mode="mfbe_pitch",
+    use_gating=True,
+    use_ptm_on_the_fly=False,
+    ptm_model_id="facebook/wav2vec2-base",
+    ptm_sample_rate=16000,
+):
     """
     Create and initialize model.
 
@@ -867,7 +879,7 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
         num_speakers: Number of speakers
         device: "cuda" or "cpu"
         mode: 1, 2, or 3
-        fusion_method: "concat", "cross_attention", or "gating" (for mode 3)
+        fusion_method: "concat", "film", or "gating" (for mode 3)
         feature_mode: Feature mode for handcrafted features
         use_gating: Whether to use gating mechanism
 
@@ -879,7 +891,10 @@ def get_model(num_speakers, device="cuda", mode=MODE, fusion_method=FUSION_METHO
         mode=mode,
         fusion_method=fusion_method,
         feature_mode=feature_mode,
-        use_gating=use_gating
+        use_gating=use_gating,
+        use_ptm_on_the_fly=use_ptm_on_the_fly,
+        ptm_model_id=ptm_model_id,
+        ptm_sample_rate=ptm_sample_rate,
     )
     model = model.to(device)
 

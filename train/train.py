@@ -17,6 +17,7 @@ import csv
 import shutil
 import hashlib
 import time
+import gc
 from datetime import datetime
 from tqdm import tqdm
 from torchinfo import summary
@@ -164,8 +165,10 @@ def compute_hard_negative_loss(embeddings, labels, topk=20, margin=0.1):
     loss_vec = F.relu(margin + hard_neg[valid_anchor] - pos_mean[valid_anchor])
     return loss_vec.mean()
 
-def update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=15):
+def update_aam_margin(criterion, epoch, final_margin=None, warmup_epochs=15):
     """Tăng dần Margin từ 0.0 lên mức tối đa để mô hình không bị 'sốc' loss ở những epoch đầu."""
+    if final_margin is None:
+        final_margin = float(getattr(criterion, "margin", AAM_MARGIN))
     if epoch >= warmup_epochs:
         current_margin = final_margin
     else:
@@ -203,19 +206,106 @@ def load_checkpoint(checkpoint_path, model, optimizer=None):
     return model, optimizer, epoch, best_loss
 
 
-def _count_params_and_memory(model: nn.Module):
-    total_params = int(sum(p.numel() for p in model.parameters()))
+def _estimate_pretrained_backbone_params(args):
+    """Estimate PTM backbone params for precomputed-embedding runs (Mode 1/3)."""
+    if args is None:
+        return 0, "none"
+
+    mode = int(getattr(args, "mode", 3))
+    if mode not in [1, 3]:
+        return 0, "not_applicable"
+
+    if bool(getattr(args, "use_ptm_on_the_fly", False)):
+        return 0, "runtime_counted_in_model"
+
+    candidates = [
+        str(getattr(args, "ptm_model_id", "") or "").lower(),
+        str(getattr(args, "pretrained_model", "") or "").lower(),
+    ]
+    joined = "|".join([x for x in candidates if x])
+
+    # Base-PTM defaults used in this project (approx official param counts).
+    if "wav2vec2" in joined:
+        return 95_044_608, "estimated_from_precomputed:wav2vec2_base"
+    if "hubert" in joined:
+        return 94_680_576, "estimated_from_precomputed:hubert_base"
+    if "wavlm" in joined:
+        return 94_680_576, "estimated_from_precomputed:wavlm_base"
+
+    return 0, "unknown_pretrained_model"
+
+
+def _count_params_and_memory(model: nn.Module, args=None):
+    model_total_params = int(sum(p.numel() for p in model.parameters()))
     trainable_params = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
-    total_param_bytes = int(sum(p.numel() * p.element_size() for p in model.parameters()))
+    model_total_param_bytes = int(sum(p.numel() * p.element_size() for p in model.parameters()))
     trainable_param_bytes = int(sum(p.numel() * p.element_size() for p in model.parameters() if p.requires_grad))
+
+    pretrained_runtime_params = 0
+    pretrained_runtime_trainable_params = 0
+    pretrained_runtime_param_bytes = 0
+    pretrained_runtime_trainable_param_bytes = 0
+    if hasattr(model, "ptm_extractor") and isinstance(getattr(model, "ptm_extractor"), nn.Module):
+        ptm_extractor = getattr(model, "ptm_extractor")
+        pretrained_runtime_params = int(sum(p.numel() for p in ptm_extractor.parameters()))
+        pretrained_runtime_trainable_params = int(sum(p.numel() for p in ptm_extractor.parameters() if p.requires_grad))
+        pretrained_runtime_param_bytes = int(sum(p.numel() * p.element_size() for p in ptm_extractor.parameters()))
+        pretrained_runtime_trainable_param_bytes = int(sum(p.numel() * p.element_size() for p in ptm_extractor.parameters() if p.requires_grad))
+
+    pretrained_external_params = 0
+    pretrained_source = "runtime_counted_in_model" if pretrained_runtime_params > 0 else "none"
+    if pretrained_runtime_params <= 0:
+        pretrained_external_params, pretrained_source = _estimate_pretrained_backbone_params(args)
+
+    # External estimate assumes fp32 for reporting memory footprint only.
+    pretrained_external_param_bytes = int(pretrained_external_params * 4)
+
+    pretrained_params = int(pretrained_runtime_params + pretrained_external_params)
+    pretrained_trainable_params = int(pretrained_runtime_trainable_params)
+    pretrained_param_bytes = int(pretrained_runtime_param_bytes + pretrained_external_param_bytes)
+    pretrained_trainable_param_bytes = int(pretrained_runtime_trainable_param_bytes)
+
+    model_params_excluding_pretrained = int(model_total_params - pretrained_runtime_params)
+    model_param_bytes_excluding_pretrained = int(model_total_param_bytes - pretrained_runtime_param_bytes)
+
+    total_params_including_pretrained = int(model_params_excluding_pretrained + pretrained_params)
+    total_param_bytes_including_pretrained = int(model_param_bytes_excluding_pretrained + pretrained_param_bytes)
+
     return {
-        "total_params": total_params,
+        "total_params": total_params_including_pretrained,
         "trainable_params": trainable_params,
-        "total_param_memory_bytes": total_param_bytes,
-        "total_param_memory_mb": float(total_param_bytes / (1024 ** 2)),
+        "total_param_memory_bytes": total_param_bytes_including_pretrained,
+        "total_param_memory_mb": float(total_param_bytes_including_pretrained / (1024 ** 2)),
         "trainable_param_memory_bytes": trainable_param_bytes,
         "trainable_param_memory_mb": float(trainable_param_bytes / (1024 ** 2)),
+        "model_params_excluding_pretrained": model_params_excluding_pretrained,
+        "model_param_memory_bytes_excluding_pretrained": model_param_bytes_excluding_pretrained,
+        "model_param_memory_mb_excluding_pretrained": float(model_param_bytes_excluding_pretrained / (1024 ** 2)),
+        "includes_pretrained_backbone_params": bool(pretrained_params > 0),
+        "pretrained_backbone_param_source": pretrained_source,
+        "pretrained_backbone_params": pretrained_params,
+        "pretrained_backbone_trainable_params": pretrained_trainable_params,
+        "pretrained_backbone_param_memory_bytes": pretrained_param_bytes,
+        "pretrained_backbone_param_memory_mb": float(pretrained_param_bytes / (1024 ** 2)),
+        "pretrained_backbone_trainable_param_memory_bytes": pretrained_trainable_param_bytes,
+        "pretrained_backbone_trainable_param_memory_mb": float(pretrained_trainable_param_bytes / (1024 ** 2)),
     }
+
+
+def _shutdown_dataloader_workers(loader):
+    """Best-effort shutdown for DataLoader workers in long notebook train-all loops."""
+    if loader is None:
+        return
+    iterator = getattr(loader, "_iterator", None)
+    if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+        try:
+            iterator._shutdown_workers()
+        except Exception:
+            pass
+        try:
+            loader._iterator = None
+        except Exception:
+            pass
 
 
 def _build_inputs_from_batch(batch_data, device, non_blocking=False):
@@ -291,15 +381,24 @@ def _write_results_csv(exp_dir, final_results):
         "best_val_mindcf": final_results.get("best_val_mindcf"),
         "epochs_trained": final_results.get("epochs_trained"),
         "total_train_time_sec": final_results.get("performance", {}).get("total_train_time_sec"),
+        "total_train_loop_time_sec": final_results.get("performance", {}).get("total_train_loop_time_sec"),
+        "total_val_time_sec": final_results.get("performance", {}).get("total_val_time_sec"),
         "avg_train_epoch_time_sec": final_results.get("performance", {}).get("avg_train_epoch_time_sec"),
         "avg_val_epoch_time_sec": final_results.get("performance", {}).get("avg_val_epoch_time_sec"),
         "gflops_per_sample": final_results.get("performance", {}).get("gflops_per_sample"),
         "gflops_total": final_results.get("performance", {}).get("gflops_total"),
         "peak_gpu_memory_allocated_mb": final_results.get("performance", {}).get("peak_gpu_memory_allocated_mb"),
+        "peak_gpu_memory_reserved_mb": final_results.get("performance", {}).get("peak_gpu_memory_reserved_mb"),
         "total_params": final_results.get("model_stats", {}).get("total_params"),
         "trainable_params": final_results.get("model_stats", {}).get("trainable_params"),
         "total_param_memory_mb": final_results.get("model_stats", {}).get("total_param_memory_mb"),
         "trainable_param_memory_mb": final_results.get("model_stats", {}).get("trainable_param_memory_mb"),
+        "includes_pretrained_backbone_params": final_results.get("model_stats", {}).get("includes_pretrained_backbone_params"),
+        "pretrained_backbone_param_source": final_results.get("model_stats", {}).get("pretrained_backbone_param_source"),
+        "pretrained_backbone_params": final_results.get("model_stats", {}).get("pretrained_backbone_params"),
+        "pretrained_backbone_trainable_params": final_results.get("model_stats", {}).get("pretrained_backbone_trainable_params"),
+        "pretrained_backbone_param_memory_mb": final_results.get("model_stats", {}).get("pretrained_backbone_param_memory_mb"),
+        "pretrained_backbone_trainable_param_memory_mb": final_results.get("model_stats", {}).get("pretrained_backbone_trainable_param_memory_mb"),
     }
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -326,15 +425,24 @@ def _update_experiment_mode_summary(experiment_root, final_results, exp_dir):
         "best_val_mindcf": final_results.get("best_val_mindcf"),
         "epochs_trained": final_results.get("epochs_trained"),
         "total_train_time_sec": final_results.get("performance", {}).get("total_train_time_sec"),
+        "total_train_loop_time_sec": final_results.get("performance", {}).get("total_train_loop_time_sec"),
+        "total_val_time_sec": final_results.get("performance", {}).get("total_val_time_sec"),
         "avg_train_epoch_time_sec": final_results.get("performance", {}).get("avg_train_epoch_time_sec"),
         "avg_val_epoch_time_sec": final_results.get("performance", {}).get("avg_val_epoch_time_sec"),
         "gflops_per_sample": final_results.get("performance", {}).get("gflops_per_sample"),
         "gflops_total": final_results.get("performance", {}).get("gflops_total"),
         "peak_gpu_memory_allocated_mb": final_results.get("performance", {}).get("peak_gpu_memory_allocated_mb"),
+        "peak_gpu_memory_reserved_mb": final_results.get("performance", {}).get("peak_gpu_memory_reserved_mb"),
         "total_params": final_results.get("model_stats", {}).get("total_params"),
         "trainable_params": final_results.get("model_stats", {}).get("trainable_params"),
         "total_param_memory_mb": final_results.get("model_stats", {}).get("total_param_memory_mb"),
         "trainable_param_memory_mb": final_results.get("model_stats", {}).get("trainable_param_memory_mb"),
+        "includes_pretrained_backbone_params": final_results.get("model_stats", {}).get("includes_pretrained_backbone_params"),
+        "pretrained_backbone_param_source": final_results.get("model_stats", {}).get("pretrained_backbone_param_source"),
+        "pretrained_backbone_params": final_results.get("model_stats", {}).get("pretrained_backbone_params"),
+        "pretrained_backbone_trainable_params": final_results.get("model_stats", {}).get("pretrained_backbone_trainable_params"),
+        "pretrained_backbone_param_memory_mb": final_results.get("model_stats", {}).get("pretrained_backbone_param_memory_mb"),
+        "pretrained_backbone_trainable_param_memory_mb": final_results.get("model_stats", {}).get("pretrained_backbone_trainable_param_memory_mb"),
     }
 
     summary_json = os.path.join(experiment_root, "summary_all_modes.json")
@@ -857,7 +965,12 @@ def train_epoch(
 
     progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]", leave=False)
 
-    max_steps_per_epoch = None if max_steps_per_epoch is None else max(1, int(max_steps_per_epoch))
+    if max_steps_per_epoch is None:
+        max_steps_per_epoch = None
+    else:
+        max_steps_per_epoch = int(max_steps_per_epoch)
+        if max_steps_per_epoch <= 0:
+            max_steps_per_epoch = None
 
     for batch_idx, batch_data in enumerate(progress_bar):
         if max_steps_per_epoch is not None and batch_idx >= max_steps_per_epoch:
@@ -1138,7 +1251,8 @@ def train(args):
         args: argparse.Namespace object with training configuration
     """
     # Setup
-    cudnn.benchmark = True
+    cudnn_benchmark = bool(getattr(args, "cudnn_benchmark", os.name != "nt"))
+    cudnn.benchmark = cudnn_benchmark
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -1154,6 +1268,36 @@ def train(args):
     
     device = torch.device(DEVICE)
     use_mixed_precision = bool(getattr(args, "mixed_precision", MIXED_PRECISION))
+
+    # Runtime/data-loader knobs (with safe defaults).
+    # On Windows + notebooks, multiprocessing DataLoader workers are less stable,
+    # so default to single-process unless caller explicitly sets num_workers.
+    default_num_workers = 0 if os.name == "nt" else 4
+    num_workers = max(0, int(getattr(args, "num_workers", default_num_workers)))
+    if os.name == "nt" and int(getattr(args, "mode", 3)) in [1, 3]:
+        win_cap = max(0, int(getattr(args, "win_mode13_max_workers", num_workers)))
+        num_workers = min(num_workers, win_cap)
+
+    pin_memory = bool(getattr(args, "pin_memory", str(device).startswith("cuda")))
+    persistent_workers = bool(getattr(args, "persistent_workers", num_workers > 0)) and (num_workers > 0)
+
+    if num_workers > 0:
+        prefetch_factor = max(1, int(getattr(args, "prefetch_factor", 2)))
+    else:
+        prefetch_factor = None
+
+    val_batch_size = max(1, int(getattr(args, "val_batch_size", args.batch_size)))
+    validate_every = max(1, int(getattr(args, "validate_every", 1)))
+    max_train_steps_per_epoch = int(getattr(args, "max_train_steps_per_epoch", 0))
+    train_subset_fraction = float(getattr(args, "train_subset_fraction", 1.0))
+    max_train_samples = int(getattr(args, "max_train_samples", 0))
+    val_max_pos_pairs = int(getattr(args, "val_max_pos_pairs", 10000))
+    if val_max_pos_pairs <= 0:
+        val_max_pos_pairs = 10000
+    non_blocking_transfer = bool(getattr(args, "non_blocking_transfer", bool(pin_memory)))
+    preload_all_ram = getattr(args, "preload_all_ram", None)
+    preload_ptm_ram = getattr(args, "preload_ptm_ram", None)
+    preload_hc_ram = getattr(args, "preload_hc_ram", None)
 
     # Auto-generate experiment name if not provided
     if args.exp_name is None:
@@ -1174,7 +1318,8 @@ def train(args):
             args.val_batch_size = int(target_val_bs)
     
     # Create experiment directory
-    exp_dir = os.path.join(args.output_dir, "experiments", args.exp_name)
+    experiments_dirname = str(getattr(args, "experiments_dirname", "experiments") or "experiments")
+    exp_dir = os.path.join(args.output_dir, experiments_dirname, args.exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
     # Khởi tạo TensorBoard Writer
@@ -1219,8 +1364,8 @@ def train(args):
     print(f"{'Mixed Precision':<30} {use_mixed_precision}")
     print(f"\n{'Early Stop Patience':<30} {args.early_stop_patience}")
     print(f"{'LR Scheduler':<30} {args.lr_scheduler}")
-    print(f"{'AAM Margin':<30} {AAM_MARGIN}")
-    print(f"{'AAM Scale':<30} {AAM_SCALE}")
+    print(f"{'AAM Margin':<30} {float(getattr(args, 'aam_margin', AAM_MARGIN))}")
+    print(f"{'AAM Scale':<30} {float(getattr(args, 'aam_scale', AAM_SCALE))}")
     print(f"\n{'Experiment Dir':<30} {exp_dir}")
     print("="*80 + "\n")
 
@@ -1235,6 +1380,7 @@ def train(args):
     print(f"{'Hard Negative Mining':<30} {HARD_NEGATIVE_MINING}")
     print(f"{'Hard Neg Weight/TopK':<30} {HARD_NEGATIVE_WEIGHT} / {HARD_NEGATIVE_TOPK}")
     print(f"{'Augment Prob':<30} {AUGMENT_PROB}")
+    print(f"{'cuDNN Benchmark':<30} {cudnn_benchmark}")
 
     config_snapshot = {
         "exp_name": args.exp_name,
@@ -1267,6 +1413,11 @@ def train(args):
         "pin_memory": pin_memory,
         "persistent_workers": persistent_workers,
         "prefetch_factor": prefetch_factor,
+        "non_blocking_transfer": non_blocking_transfer,
+        "cudnn_benchmark": cudnn_benchmark,
+        "preload_all_ram": preload_all_ram,
+        "preload_ptm_ram": preload_ptm_ram,
+        "preload_hc_ram": preload_hc_ram,
         "validate_every": validate_every,
         "max_train_steps_per_epoch": max_train_steps_per_epoch,
         "train_subset_fraction": train_subset_fraction,
@@ -1274,8 +1425,8 @@ def train(args):
         "val_max_pos_pairs": val_max_pos_pairs,
         "early_stop_patience": args.early_stop_patience,
         "lr_scheduler": args.lr_scheduler,
-        "aam_margin": AAM_MARGIN,
-        "aam_scale": AAM_SCALE,
+        "aam_margin": float(getattr(args, "aam_margin", AAM_MARGIN)),
+        "aam_scale": float(getattr(args, "aam_scale", AAM_SCALE)),
     }
     with open(os.path.join(exp_dir, "config.json"), "w") as f:
         json.dump(config_snapshot, f, indent=2)
@@ -1301,6 +1452,9 @@ def train(args):
         max_audio_seconds=float(getattr(args, 'max_audio_seconds', 8.0)),
         train_subset_fraction=float(getattr(args, 'train_subset_fraction', 1.0)),
         max_train_samples=int(getattr(args, 'max_train_samples', 0)),
+        preload_all_ram=preload_all_ram,
+        preload_ptm_ram=preload_ptm_ram,
+        preload_hc_ram=preload_hc_ram,
     )
     print(f"✓ Loaded {num_speakers} speakers")
     print(f"  Train: {len(train_loader.dataset)}, Val: {len(val_loader.dataset)}\n")
@@ -1316,7 +1470,10 @@ def train(args):
         mode=args.mode,
         fusion_method=args.fusion_method,
         feature_mode=args.feature_mode,
-        use_gating=args.use_gating
+        use_gating=args.use_gating,
+        use_ptm_on_the_fly=bool(getattr(args, "use_ptm_on_the_fly", False)),
+        ptm_model_id=str(getattr(args, "ptm_model_id", "facebook/wav2vec2-base")),
+        ptm_sample_rate=int(getattr(args, "audio_sample_rate", 16000)),
     )
 
     # Stage A -> Stage B warm-start (best-effort)
@@ -1370,8 +1527,32 @@ def train(args):
             print(f"⚠ Could not save model summary: {e}")
 
     # Loss and optimizer
-    criterion = AAMSoftmaxLoss(num_speakers=num_speakers, embedding_dim=args.embedding_dim)
+    runtime_aam_margin = float(getattr(args, "aam_margin", AAM_MARGIN))
+    runtime_aam_scale = float(getattr(args, "aam_scale", AAM_SCALE))
+    criterion = AAMSoftmaxLoss(
+        num_speakers=num_speakers,
+        embedding_dim=args.embedding_dim,
+        margin=runtime_aam_margin,
+        scale=runtime_aam_scale,
+    )
     criterion = criterion.to(device)
+
+    # Static model stats + one-shot FLOPs profile for reporting.
+    model_stats = _count_params_and_memory(model, args=args)
+    gflops_per_sample = 0.0
+    try:
+        profile_batch = next(iter(train_loader))
+        gflops_per_sample = _profile_gflops_per_sample(
+            model,
+            criterion,
+            profile_batch,
+            device,
+            use_mixed_precision=use_mixed_precision,
+        )
+    except StopIteration:
+        print("[WARN] train_loader rỗng, bỏ qua GFLOPs profiling.")
+    except Exception as ex:
+        print(f"[WARN] GFLOPs profiling failed: {type(ex).__name__}: {ex}")
 
     if args.optimizer.lower() == "adam":
         params = list(model.parameters()) + list(criterion.parameters())
@@ -1447,6 +1628,7 @@ def train(args):
     for epoch in range(args.num_epochs):
         #current_margin = update_aam_margin(criterion, epoch, final_margin=AAM_MARGIN, warmup_epochs=5)
         #print(f"\n[Info] Epoch {epoch + 1}: AAM-Softmax Margin set to {current_margin:.4f}")
+        epoch_start_time = time.perf_counter()
         
         # Train
         train_start_time = time.perf_counter()
@@ -1554,11 +1736,15 @@ def train(args):
     # Save final results
     total_train_time_sec = float(time.perf_counter() - run_start_time)
     epochs_trained = int(epoch + 1)
+    total_train_loop_time_sec = float(np.sum(training_history["train_epoch_time_sec"])) if training_history["train_epoch_time_sec"] else 0.0
+    total_val_time_sec = float(np.sum(training_history["val_epoch_time_sec"])) if training_history["val_epoch_time_sec"] else 0.0
     avg_train_epoch_time_sec = float(np.mean(training_history["train_epoch_time_sec"])) if training_history["train_epoch_time_sec"] else 0.0
     avg_val_epoch_time_sec = float(np.mean(training_history["val_epoch_time_sec"])) if training_history["val_epoch_time_sec"] else 0.0
     peak_gpu_memory_allocated_mb = 0.0
+    peak_gpu_memory_reserved_mb = 0.0
     if torch.cuda.is_available() and str(device).startswith("cuda"):
         peak_gpu_memory_allocated_mb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+        peak_gpu_memory_reserved_mb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
 
     total_seen_samples = int((train_dataset_size + val_dataset_size) * epochs_trained)
     gflops_total = float(gflops_per_sample * total_seen_samples)
@@ -1575,6 +1761,8 @@ def train(args):
         "model_stats": model_stats,
         "performance": {
             "total_train_time_sec": total_train_time_sec,
+            "total_train_loop_time_sec": total_train_loop_time_sec,
+            "total_val_time_sec": total_val_time_sec,
             "avg_train_epoch_time_sec": avg_train_epoch_time_sec,
             "avg_val_epoch_time_sec": avg_val_epoch_time_sec,
             "train_epoch_time_sec": training_history["train_epoch_time_sec"],
@@ -1584,6 +1772,7 @@ def train(args):
             "gflops_total": gflops_total,
             "total_samples_accounted": total_seen_samples,
             "peak_gpu_memory_allocated_mb": peak_gpu_memory_allocated_mb,
+            "peak_gpu_memory_reserved_mb": peak_gpu_memory_reserved_mb,
         },
     }
 
@@ -1612,5 +1801,19 @@ def train(args):
     print(f"  Model: {os.path.join(exp_dir, BEST_MODEL_NAME)}")
 
     writer.close()
+
+    # Explicit teardown for long train-all loops in notebooks.
+    _shutdown_dataloader_workers(train_loader)
+    _shutdown_dataloader_workers(val_loader)
+    del train_loader
+    del val_loader
+    del val_trials
+    del criterion
+    del opt
+    del scheduler
+    del scaler
+    gc.collect()
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
     
     return model, training_history, exp_dir

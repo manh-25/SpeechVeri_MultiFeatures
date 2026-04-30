@@ -14,7 +14,7 @@ FEATURE_PATH = "path/to/feature.pt"      # Handcrafted features (N, D, T)
 # Mode selection: 1 (PTM only), 2 (Handcrafted only), 3 (PTM + Handcrafted)
 MODE = 1
 
-# Fusion method for MODE 3: "concat", "cross_attention", or "gating"
+# Fusion method for MODE 3 (late fusion, embedding-level): "concat", "film", or "gating"
 FUSION_METHOD = "gating"
 
 # Feature mode for handcrafted features: "mfbe_pitch", "mfcc_pitch", "fbank_pitch", "mfbe_only", "mfcc_only", "fbank_only", "pitch_only"

@@ -249,12 +249,18 @@ class SpeakerDataset(Dataset):
                 )
             shard_data = self._embedding_shard_cache[shard_path]
             emb = shard_data["embeddings"][local_idx].float()
+            if emb.dim() == 3:
+                # Revert to static PTM embedding format by averaging time axis.
+                emb = emb.mean(dim=1)
             emb_len = rec.get("length", None)
             if emb_len is None and "lengths" in shard_data:
                 emb_len = int(shard_data["lengths"][local_idx])
             return emb, emb_len
 
         emb = self.embedding_data["embeddings"][idx].float()
+        if emb.dim() == 3:
+            # Revert to static PTM embedding format by averaging time axis.
+            emb = emb.mean(dim=1)
         emb_len = None
         if "lengths" in self.embedding_data and len(self.embedding_data["lengths"]) > idx:
             emb_len = int(self.embedding_data["lengths"][idx])
@@ -508,40 +514,9 @@ def collate_fn_general(
             if emb_example.dim() == 2:
                 output["embedding"] = torch.stack(embeddings)
 
-            # New temporal format: (L, T, D)
+            # Temporal format: (L, T, D) -> collapse to static (L, D)
             elif emb_example.dim() == 3:
-                # Cap temporal length to avoid extreme padding/cropping memory spikes.
-                emb_lengths = [int(item.get("embedding_length", emb.shape[1])) for item, emb in zip(batch, embeddings)]
-                emb_lengths = [max(1, min(l, emb.shape[1])) for l, emb in zip(emb_lengths, embeddings)]
-                target_t = int(max_frames) if max_frames is not None else int(max(emb_lengths))
-                target_t = max(1, target_t)
-
-                processed_embeddings = []
-                for emb, emb_len in zip(embeddings, emb_lengths):
-                    emb_len = int(max(1, min(emb_len, emb.shape[1])))
-
-                    if emb_len > target_t:
-                        if is_train:
-                            start = random.randint(0, emb_len - target_t)
-                        else:
-                            start = 0
-                        emb = emb[:, start:start + target_t, :]
-                        emb_len = target_t
-                    else:
-                        emb = emb[:, :target_t, :]
-                        emb_len = min(emb_len, target_t)
-
-                    if emb.shape[1] < target_t:
-                        pad_len = target_t - emb.shape[1]
-                        emb = F.pad(emb, (0, 0, 0, pad_len))
-
-                    processed_embeddings.append(emb)
-
-                output["embedding"] = torch.stack(processed_embeddings)
-                output["embedding_lengths"] = torch.tensor(
-                    [min(int(l), target_t) for l in emb_lengths],
-                    dtype=torch.long,
-                )
+                output["embedding"] = torch.stack([emb.mean(dim=1) for emb in embeddings])
             else:
                 raise ValueError(f"PTM embedding shape không hợp lệ: {tuple(emb_example.shape)}")
 
@@ -650,7 +625,15 @@ def _order_indices_by_embedding_shard(indices, embedding_index, rng=None, shuffl
     return ordered
 
 
-def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False):
+def load_data(
+    embedding_path,
+    feature_dir=None,
+    mode=1,
+    use_ptm_on_the_fly=False,
+    preload_all_ram=None,
+    preload_ptm_ram=None,
+    preload_hc_ram=None,
+):
     embedding_data = {
         "speaker_ids": [],
         "filenames": [],
@@ -680,15 +663,42 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
     mode3_strict_speaker_match = os.getenv("SV_MODE3_STRICT_SPK_MATCH", "1") == "1"
     use_ptm_on_the_fly = bool(use_ptm_on_the_fly)
 
+    # Default behavior: preload everything to RAM for all modes.
+    # Can be overridden per-run via function args (used by train-all loops).
+    if preload_all_ram is None:
+        preload_all_ram = os.getenv("SV_PRELOAD_ALL_RAM", "1") == "1"
+    else:
+        preload_all_ram = bool(preload_all_ram)
+
+    if preload_ptm_ram is None:
+        preload_ptm_ram = os.getenv("SV_PRELOAD_PTM_RAM", "1" if preload_all_ram else "0") == "1"
+    else:
+        preload_ptm_ram = bool(preload_ptm_ram)
+
+    if preload_hc_ram is None:
+        preload_hc_ram = os.getenv("SV_PRELOAD_HC_RAM", "1" if preload_all_ram else "0") == "1"
+    else:
+        preload_hc_ram = bool(preload_hc_ram)
+
+    preload_ptm_ram = preload_ptm_ram and (not use_ptm_on_the_fly) and int(mode) in [1, 3]
+    preload_hc_ram = preload_hc_ram and int(mode) in [2, 3]
+
+    # Backward compatibility for older mode-2-only knob.
+    if int(mode) == 2 and not preload_hc_ram and os.getenv("SV_MODE2_PRELOAD_HC_RAM", "0") == "1":
+        preload_hc_ram = True
+
     if mode3_match_by_filename and use_aligned_fastpath:
         use_aligned_fastpath = False
         print("ℹ Mode3 join mode: filename-based (aligned fast-path disabled).")
 
+    if preload_ptm_ram and use_aligned_fastpath:
+        use_aligned_fastpath = False
+        print("ℹ Full-RAM PTM preload bật: chuyển sang full metadata scan (disable aligned fast-path).")
+
     hc_shard_counts = []
     hc_shards = []
-    preload_mode2_hc_ram = (
-        mode == 2 and os.getenv("SV_MODE2_PRELOAD_HC_RAM", "1") == "1"
-    )
+    hc_global_idx = 0
+    ptm_global_idx = 0
 
     # Fast path: when PTM/HC are already aligned in order, use HC metadata only.
     if mode in [2, 3]:
@@ -714,16 +724,19 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
             shard_count = int(shard_features.shape[0]) if torch.is_tensor(shard_features) else len(shard_features)
             hc_shard_counts.append(shard_count)
 
-            if preload_mode2_hc_ram:
+            if preload_hc_ram:
                 if torch.is_tensor(shard_features):
                     for i in range(shard_count):
                         feature_data["features"].append(shard_features[i].float().cpu())
                 else:
                     for x in shard_features:
                         feature_data["features"].append(x.float().cpu())
-            else:
-                for i in range(shard_count):
-                    feature_data["feature_index"].append({"shard_path": shard, "local_idx": i})
+
+            for i in range(shard_count):
+                feature_data["feature_index"].append(
+                    {"shard_path": shard, "local_idx": i, "global_idx": hc_global_idx}
+                )
+                hc_global_idx += 1
 
             # Keep HC metadata for later split/join.
             hc_speaker_ids.extend(shard_data["speaker_ids"])
@@ -736,18 +749,22 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
         if not hc_shard_counts:
             raise RuntimeError("Không load được HC shard nào hợp lệ sau khi lọc/cảnh báo lỗi.")
 
-        if preload_mode2_hc_ram:
-            if len(feature_data["features"]) == 0:
-                raise RuntimeError("Mode 2 preload bật nhưng không có HC feature nào hợp lệ để nạp RAM.")
-            feature_data.pop("feature_index", None)
-            hc_total_samples = len(feature_data["features"])
+        if preload_hc_ram and len(feature_data["features"]) == 0:
+            raise RuntimeError("HC preload bật nhưng không có HC feature nào hợp lệ để nạp RAM.")
+
+        hc_total_samples = (
+            len(feature_data["features"])
+            if preload_hc_ram
+            else len(feature_data["feature_index"])
+        )
+
+        if preload_hc_ram:
             print(
-                f"✅ Mode2 preload RAM: đã nạp {len(hc_shards)} HC shards vào RAM. "
+                f"✅ HC preload RAM: đã nạp {len(hc_shards)} HC shards vào RAM. "
                 f"Tổng sample HC: {hc_total_samples}"
             )
         else:
             feature_data.pop("features", None)
-            hc_total_samples = len(feature_data["feature_index"])
 
         print(f"✅ Đã nạp xong metadata {len(hc_shards)} HC shards. Tổng số sample HC: {hc_total_samples}")
 
@@ -814,7 +831,10 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                 if len(shard_files) == len(hc_shard_counts):
                     for shard, shard_count in zip(shard_files, hc_shard_counts):
                         for i in range(int(shard_count)):
-                            ptm_embedding_index.append({"shard_path": shard, "local_idx": i})
+                            ptm_embedding_index.append(
+                                {"shard_path": shard, "local_idx": i, "global_idx": ptm_global_idx}
+                            )
+                            ptm_global_idx += 1
                 else:
                     if aligned_ptm_samples_per_shard <= 0:
                         raise RuntimeError(
@@ -855,7 +875,10 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                     for shard, shard_count in zip(shard_files, ptm_counts):
                         take_n = min(int(shard_count), remaining)
                         for i in range(int(take_n)):
-                            ptm_embedding_index.append({"shard_path": shard, "local_idx": i})
+                            ptm_embedding_index.append(
+                                {"shard_path": shard, "local_idx": i, "global_idx": ptm_global_idx}
+                            )
+                            ptm_global_idx += 1
                         remaining -= int(take_n)
                         if remaining <= 0:
                             break
@@ -863,6 +886,8 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                     hc_speaker_ids = hc_speaker_ids[:ptm_total]
                     hc_filenames = hc_filenames[:ptm_total]
                     feature_data["feature_index"] = feature_data["feature_index"][:ptm_total]
+                    if preload_hc_ram and "features" in feature_data:
+                        feature_data["features"] = feature_data["features"][:ptm_total]
 
                     print(
                         f"✅ Aligned-prefix Mode3: PTM samples={ptm_total} | HC prefix samples={ptm_total} "
@@ -899,10 +924,19 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                     for i in range(shard_count):
                         ptm_speaker_ids.append(shard_speakers[i])
                         ptm_filenames.append(str(shard_filenames[i]))
-                        rec = {"shard_path": shard, "local_idx": i}
+                        rec = {"shard_path": shard, "local_idx": i, "global_idx": ptm_global_idx}
+                        ptm_global_idx += 1
                         if shard_lengths is not None and i < len(shard_lengths):
                             rec["length"] = int(shard_lengths[i])
                         ptm_embedding_index.append(rec)
+                        if preload_ptm_ram:
+                            ptm_item = shard_embeddings[i]
+                            if torch.is_tensor(ptm_item):
+                                embedding_data["embeddings"].append(ptm_item.float().cpu())
+                            else:
+                                embedding_data["embeddings"].append(torch.tensor(ptm_item, dtype=torch.float32))
+                            if shard_lengths is not None and i < len(shard_lengths):
+                                embedding_data["lengths"].append(int(shard_lengths[i]))
 
                     del shard_data
                     gc.collect()
@@ -958,6 +992,30 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                     embedding_data["embedding_index"] = matched_ptm_index
                     feature_data["feature_index"] = matched_hc_index
 
+                    if preload_ptm_ram and "embeddings" in embedding_data:
+                        reordered_emb = []
+                        reordered_len = []
+                        have_len = len(embedding_data.get("lengths", [])) == len(embedding_data.get("embeddings", []))
+                        for rec in matched_ptm_index:
+                            gidx = int(rec.get("global_idx", -1))
+                            if gidx < 0 or gidx >= len(embedding_data["embeddings"]):
+                                raise RuntimeError("PTM preload map lỗi: global_idx vượt phạm vi.")
+                            reordered_emb.append(embedding_data["embeddings"][gidx])
+                            if have_len:
+                                reordered_len.append(int(embedding_data["lengths"][gidx]))
+                        embedding_data["embeddings"] = reordered_emb
+                        if have_len:
+                            embedding_data["lengths"] = reordered_len
+
+                    if preload_hc_ram and "features" in feature_data:
+                        reordered_feat = []
+                        for rec in matched_hc_index:
+                            gidx = int(rec.get("global_idx", -1))
+                            if gidx < 0 or gidx >= len(feature_data["features"]):
+                                raise RuntimeError("HC preload map lỗi: global_idx vượt phạm vi.")
+                            reordered_feat.append(feature_data["features"][gidx])
+                        feature_data["features"] = reordered_feat
+
                     print(
                         "✅ Mode3 filename-join: "
                         f"matched={len(matched_ptm_index)} | unmatched_ptm={unmatched_ptm} "
@@ -970,9 +1028,16 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                     feature_data["feature_index"] = feature_data["feature_index"][:n]
                     embedding_data["speaker_ids"] = hc_speaker_ids[:n]
                     embedding_data["filenames"] = hc_filenames[:n]
+                    if preload_ptm_ram and "embeddings" in embedding_data:
+                        embedding_data["embeddings"] = embedding_data["embeddings"][:n]
+                        if "lengths" in embedding_data:
+                            embedding_data["lengths"] = embedding_data["lengths"][:n]
+                    if preload_hc_ram and "features" in feature_data:
+                        feature_data["features"] = feature_data["features"][:n]
 
-            embedding_data.pop("embeddings", None)
-            embedding_data.pop("lengths", None)
+            if not preload_ptm_ram:
+                embedding_data.pop("embeddings", None)
+                embedding_data.pop("lengths", None)
             print(f"✅ Đã load gộp {len(shard_files)} file shards. Tổng số sample PTM: {len(embedding_data['embedding_index'])}")
         else:
             print("📦 PTM input source: precomputed single .pt file")
@@ -1000,13 +1065,23 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
                 n = len(raw_embeddings)
 
             for i in range(n):
-                rec = {"shard_path": embedding_path, "local_idx": i}
+                rec = {"shard_path": embedding_path, "local_idx": i, "global_idx": ptm_global_idx}
+                ptm_global_idx += 1
                 if raw_lengths is not None and i < len(raw_lengths):
                     rec["length"] = int(raw_lengths[i])
                 embedding_data["embedding_index"].append(rec)
+                if preload_ptm_ram:
+                    ptm_item = raw_embeddings[i]
+                    if torch.is_tensor(ptm_item):
+                        embedding_data["embeddings"].append(ptm_item.float().cpu())
+                    else:
+                        embedding_data["embeddings"].append(torch.tensor(ptm_item, dtype=torch.float32))
+                    if raw_lengths is not None and i < len(raw_lengths):
+                        embedding_data["lengths"].append(int(raw_lengths[i]))
 
-            embedding_data.pop("embeddings", None)
-            embedding_data.pop("lengths", None)
+            if not preload_ptm_ram:
+                embedding_data.pop("embeddings", None)
+                embedding_data.pop("lengths", None)
 
             del raw_data
             gc.collect()
@@ -1017,7 +1092,32 @@ def load_data(embedding_path, feature_dir=None, mode=1, use_ptm_on_the_fly=False
         embedding_data["speaker_ids"] = list(hc_speaker_ids)
         embedding_data["filenames"] = list(hc_filenames)
 
-    if use_aligned_fastpath and int(mode) == 3:
+    if preload_ptm_ram and int(mode) in [1, 3] and not use_ptm_on_the_fly:
+        if len(embedding_data.get("embeddings", [])) != len(embedding_data.get("speaker_ids", [])):
+            raise RuntimeError(
+                "PTM preload RAM không đồng bộ kích thước: "
+                f"embeddings={len(embedding_data.get('embeddings', []))}, "
+                f"speaker_ids={len(embedding_data.get('speaker_ids', []))}"
+            )
+        embedding_data.pop("embedding_index", None)
+        print(f"✅ PTM preload RAM active: {len(embedding_data['embeddings'])} samples in-memory.")
+
+    if preload_hc_ram and int(mode) in [2, 3]:
+        if len(feature_data.get("features", [])) != len(embedding_data.get("speaker_ids", [])):
+            raise RuntimeError(
+                "HC preload RAM không đồng bộ kích thước: "
+                f"features={len(feature_data.get('features', []))}, "
+                f"speaker_ids={len(embedding_data.get('speaker_ids', []))}"
+            )
+        feature_data.pop("feature_index", None)
+        print(f"✅ HC preload RAM active: {len(feature_data['features'])} samples in-memory.")
+
+    if (
+        use_aligned_fastpath
+        and int(mode) == 3
+        and "embedding_index" in embedding_data
+        and "feature_index" in feature_data
+    ):
         # Defensive check: PTM/HC index lengths must match exactly.
         if len(embedding_data["embedding_index"]) != len(feature_data["feature_index"]):
             raise RuntimeError(
@@ -1050,6 +1150,9 @@ def create_train_val_loaders(
     max_audio_seconds=8.0,
     train_subset_fraction=1.0,
     max_train_samples=0,
+    preload_all_ram=None,
+    preload_ptm_ram=None,
+    preload_hc_ram=None,
 ):
     # Nạp dữ liệu
     embedding_data, feature_data, speaker_to_idx = load_data(
@@ -1057,6 +1160,9 @@ def create_train_val_loaders(
         feature_path,
         mode,
         use_ptm_on_the_fly=bool(use_ptm_on_the_fly),
+        preload_all_ram=preload_all_ram,
+        preload_ptm_ram=preload_ptm_ram,
+        preload_hc_ram=preload_hc_ram,
     )
     
     # --- LỌC INDEX THEO SPEAKER ID (TRÁNH DATA LEAKAGE) ---

@@ -3,8 +3,11 @@ import torch.nn.functional as F
 import numpy as np
 import random
 from collections import defaultdict
+import csv
+import json
 import os
 import time
+from datetime import datetime
 from metrics import compute_eer, compute_mindcf
 from tqdm import tqdm
 
@@ -57,6 +60,315 @@ def _profile_inference_gflops_per_sample(model, device, sample_inputs):
         return float(max(0.0, (total_flops / 1e9) / float(batch_size)))
     except Exception:
         return 0.0
+
+
+def _to_serializable(value):
+    if isinstance(value, dict):
+        return {str(k): _to_serializable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_serializable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    return value
+
+
+def _sanitize_exp_name(exp_name):
+    raw = str(exp_name or "").strip()
+    if not raw:
+        raw = f"inference_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in raw)
+    return safe or f"inference_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def _extract_metric_by_prefix(metrics, prefix):
+    for key, value in metrics.items():
+        if str(key).startswith(prefix):
+            return value
+    return None
+
+
+def _build_inference_flat_row(final_results):
+    config = final_results.get("config", {}) or {}
+    metrics = final_results.get("metrics", {}) or {}
+    model_stats = final_results.get("model_stats", {}) or {}
+    performance = final_results.get("performance", {}) or {}
+
+    row = {
+        "exp_name": final_results.get("exp_name"),
+        "exp_dir": final_results.get("exp_dir"),
+        "timestamp": final_results.get("timestamp"),
+        "mode": config.get("mode"),
+        "fusion_method": config.get("fusion_method"),
+        "feature_mode": config.get("feature_mode"),
+        "duration": config.get("duration"),
+        "pretrained_model": config.get("pretrained_model"),
+        "trials_path": config.get("trials_path"),
+        "num_pairs": config.get("num_pairs"),
+        "max_trials": config.get("max_trials"),
+        "p_target": config.get("p_target"),
+        "eer_percent": metrics.get("EER (%)"),
+        "eer_threshold": metrics.get("EER Threshold"),
+        "mindcf": _extract_metric_by_prefix(metrics, "MinDCF (p="),
+        "mindcf_threshold": metrics.get("MinDCF Threshold"),
+        "runtime_total_sec": performance.get("total_runtime_sec"),
+        "runtime_extract_sec": performance.get("extract_time_sec"),
+        "runtime_score_sec": performance.get("score_time_sec"),
+        "gflops_per_sample": performance.get("gflops_per_sample"),
+        "gflops_total": performance.get("gflops_total"),
+        "total_samples_accounted": performance.get("total_samples_accounted"),
+        "peak_gpu_memory_allocated_mb": performance.get("peak_gpu_memory_allocated_mb"),
+        "peak_gpu_memory_reserved_mb": performance.get("peak_gpu_memory_reserved_mb"),
+        "total_params": model_stats.get("total_params"),
+        "trainable_params": model_stats.get("trainable_params"),
+        "total_param_memory_mb": model_stats.get("total_param_memory_mb"),
+        "trainable_param_memory_mb": model_stats.get("trainable_param_memory_mb"),
+    }
+
+    # Keep all raw metrics for full traceability in CSV.
+    for key, value in metrics.items():
+        csv_key = "metric_" + str(key).strip().lower().replace(" ", "_").replace("%", "percent")
+        row[csv_key] = value
+
+    return row
+
+
+def _write_single_row_csv(csv_path, row):
+    with open(csv_path, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(row.keys()))
+        writer.writeheader()
+        writer.writerow(row)
+
+
+def _update_inference_summary(experiment_root, row):
+    os.makedirs(experiment_root, exist_ok=True)
+    summary_json = os.path.join(experiment_root, "summary_all_modes.json")
+    summary_csv = os.path.join(experiment_root, "summary_all_modes.csv")
+
+    rows = []
+    if os.path.exists(summary_json):
+        try:
+            with open(summary_json, "r", encoding="utf-8") as file:
+                payload = json.load(file)
+                if isinstance(payload, list):
+                    rows = payload
+        except Exception:
+            rows = []
+
+    rows = [item for item in rows if item.get("exp_dir") != row.get("exp_dir")]
+    rows.append(row)
+    rows = sorted(rows, key=lambda x: (str(x.get("mode", "")), str(x.get("exp_name", ""))))
+
+    with open(summary_json, "w", encoding="utf-8") as file:
+        json.dump(_to_serializable(rows), file, indent=2)
+
+    if len(rows) > 0:
+        # Union all keys to keep old/new rows compatible if schema evolves.
+        fieldnames = []
+        seen = set()
+        for item in rows:
+            for key in item.keys():
+                if key not in seen:
+                    seen.add(key)
+                    fieldnames.append(key)
+
+        with open(summary_csv, "w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            for item in rows:
+                writer.writerow(item)
+
+    return summary_json, summary_csv
+
+
+def save_inference_artifacts(
+    output_dir,
+    eval_results,
+    exp_name=None,
+    config_snapshot=None,
+    experiments_dirname="inference_experiments",
+):
+    """Save train-like inference artifacts: config/results JSON+CSV and run summary."""
+    if not isinstance(eval_results, dict):
+        raise ValueError("eval_results must be a dict returned by evaluate_speaker_verification().")
+
+    exp_name = _sanitize_exp_name(exp_name)
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    experiment_root = os.path.join(str(output_dir), str(experiments_dirname))
+    exp_dir = os.path.join(experiment_root, exp_name)
+    os.makedirs(exp_dir, exist_ok=True)
+
+    config_snapshot = dict(config_snapshot or {})
+    config_snapshot.setdefault("exp_name", exp_name)
+    config_snapshot.setdefault("timestamp", timestamp)
+
+    model_stats = {
+        "total_params": eval_results.get("Total Params"),
+        "trainable_params": eval_results.get("Trainable Params"),
+        "total_param_memory_mb": eval_results.get("Param Memory (MB)"),
+        "trainable_param_memory_mb": eval_results.get("Trainable Param Memory (MB)"),
+    }
+
+    performance = {
+        "total_runtime_sec": eval_results.get("Runtime Total (s)"),
+        "extract_time_sec": eval_results.get("Runtime Extract (s)"),
+        "score_time_sec": eval_results.get("Runtime Score (s)"),
+        "gflops_per_sample": eval_results.get("GFLOPs/sample"),
+        "gflops_total": eval_results.get("GFLOPs total"),
+        "total_samples_accounted": eval_results.get("Total Samples Accounted"),
+        "peak_gpu_memory_allocated_mb": eval_results.get("Peak GPU Memory Allocated (MB)"),
+        "peak_gpu_memory_reserved_mb": eval_results.get("Peak GPU Memory Reserved (MB)"),
+    }
+
+    final_results = {
+        "exp_name": exp_name,
+        "exp_dir": exp_dir,
+        "timestamp": timestamp,
+        "config": config_snapshot,
+        "metrics": dict(eval_results),
+        "model_stats": model_stats,
+        "performance": performance,
+    }
+
+    config_path = os.path.join(exp_dir, "config.json")
+    with open(config_path, "w", encoding="utf-8") as file:
+        json.dump(_to_serializable(config_snapshot), file, indent=2)
+
+    results_json_path = os.path.join(exp_dir, "results.json")
+    with open(results_json_path, "w", encoding="utf-8") as file:
+        json.dump(_to_serializable(final_results), file, indent=2)
+
+    flat_row = _build_inference_flat_row(final_results)
+    results_csv_path = os.path.join(exp_dir, "results.csv")
+    _write_single_row_csv(results_csv_path, _to_serializable(flat_row))
+
+    summary_json_path, summary_csv_path = _update_inference_summary(
+        experiment_root=experiment_root,
+        row=_to_serializable(flat_row),
+    )
+
+    return {
+        "exp_dir": exp_dir,
+        "config_path": config_path,
+        "results_json_path": results_json_path,
+        "results_csv_path": results_csv_path,
+        "summary_json_path": summary_json_path,
+        "summary_csv_path": summary_csv_path,
+    }
+
+
+def _safe_test_tag(name):
+    text = str(name or "test").strip()
+    text = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in text)
+    return text or "test"
+
+
+def _coerce_report_row(exp_name, test_name, eval_results):
+    row = {
+        "Experiment": str(exp_name),
+        "Test Set": str(test_name),
+    }
+    for key, value in dict(eval_results or {}).items():
+        row[str(key)] = _to_serializable(value)
+    return row
+
+
+def _write_rows_csv(csv_path, rows):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    if not rows:
+        with open(csv_path, "w", newline="", encoding="utf-8") as file:
+            file.write("")
+        return
+
+    fieldnames = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def run_inference_benchmark_reports(
+    model,
+    test_loaders,
+    device,
+    output_dir,
+    exp_name,
+    p_target=0.05,
+    trials_by_test=None,
+    max_trials=None,
+    per_test_filename_template="{exp_name}_{test_tag}.csv",
+    all_report_filename="{exp_name}_all.csv",
+):
+    """
+    Run evaluation across test sets and save exactly N+1 CSV files:
+    - N per-test files (one per test set)
+    - 1 aggregated all-tests file
+
+    Each CSV row includes full inference metrics returned by
+    evaluate_speaker_verification (EER, MinDCF, runtime, GFLOPs, params, memory...).
+    """
+    if not isinstance(test_loaders, dict) or len(test_loaders) == 0:
+        raise ValueError("test_loaders must be a non-empty dict: {test_name: data_loader}.")
+
+    exp_name = _sanitize_exp_name(exp_name)
+    output_dir = str(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    rows_by_test = {}
+    all_rows = []
+    file_map = {}
+
+    for test_name, loader in test_loaders.items():
+        test_tag = _safe_test_tag(test_name)
+        trials_path = None
+        if isinstance(trials_by_test, dict):
+            trials_path = trials_by_test.get(test_name)
+            if trials_path is None:
+                trials_path = trials_by_test.get(test_tag)
+
+        eval_results = evaluate_speaker_verification(
+            model=model,
+            data_loader=loader,
+            device=device,
+            p_target=p_target,
+            trials_path=trials_path,
+            max_trials=max_trials,
+        )
+        row = _coerce_report_row(exp_name=exp_name, test_name=test_name, eval_results=eval_results)
+
+        rows_by_test.setdefault(test_name, []).append(row)
+        all_rows.append(row)
+
+        per_test_filename = per_test_filename_template.format(exp_name=exp_name, test_tag=test_tag)
+        per_test_path = os.path.join(output_dir, per_test_filename)
+        _write_rows_csv(per_test_path, rows_by_test[test_name])
+        file_map[str(test_name)] = per_test_path
+
+    all_report_path = os.path.join(output_dir, all_report_filename.format(exp_name=exp_name))
+    _write_rows_csv(all_report_path, all_rows)
+
+    return {
+        "exp_name": exp_name,
+        "per_test_paths": file_map,
+        "all_report_path": all_report_path,
+        "num_test_files": len(file_map),
+        "total_files": len(file_map) + 1,
+        "rows": _to_serializable(all_rows),
+    }
 
 
 def _candidate_keys(path_text):
@@ -235,8 +547,10 @@ def evaluate_speaker_verification(
         total_runtime_sec = float(time.perf_counter() - run_start_time)
         total_samples_accounted = int(len(all_labels))
         peak_gpu_memory_allocated_mb = 0.0
+        peak_gpu_memory_reserved_mb = 0.0
         if torch.cuda.is_available() and str(device).startswith("cuda"):
             peak_gpu_memory_allocated_mb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+            peak_gpu_memory_reserved_mb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
 
         return {
             "Num Pairs": int(len(y_true)),
@@ -252,6 +566,7 @@ def evaluate_speaker_verification(
             "GFLOPs total": float(gflops_per_sample * total_samples_accounted),
             "Total Samples Accounted": total_samples_accounted,
             "Peak GPU Memory Allocated (MB)": peak_gpu_memory_allocated_mb,
+            "Peak GPU Memory Reserved (MB)": peak_gpu_memory_reserved_mb,
             "Total Params": model_stats["total_params"],
             "Trainable Params": model_stats["trainable_params"],
             "Param Memory (MB)": model_stats["total_param_memory_mb"],
@@ -320,8 +635,10 @@ def evaluate_speaker_verification(
     total_runtime_sec = float(time.perf_counter() - run_start_time)
     total_samples_accounted = int(len(all_labels))
     peak_gpu_memory_allocated_mb = 0.0
+    peak_gpu_memory_reserved_mb = 0.0
     if torch.cuda.is_available() and str(device).startswith("cuda"):
         peak_gpu_memory_allocated_mb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+        peak_gpu_memory_reserved_mb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
     
     return {
         "EER (%)": float(eer * 100),
@@ -336,6 +653,7 @@ def evaluate_speaker_verification(
         "GFLOPs total": float(gflops_per_sample * total_samples_accounted),
         "Total Samples Accounted": total_samples_accounted,
         "Peak GPU Memory Allocated (MB)": peak_gpu_memory_allocated_mb,
+        "Peak GPU Memory Reserved (MB)": peak_gpu_memory_reserved_mb,
         "Total Params": model_stats["total_params"],
         "Trainable Params": model_stats["trainable_params"],
         "Param Memory (MB)": model_stats["total_param_memory_mb"],
