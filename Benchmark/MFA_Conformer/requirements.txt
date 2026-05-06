@@ -1,0 +1,3 @@
+torch>=1.9.0
+wenet>=0.1.0
+speechbrain>=0.5.0
