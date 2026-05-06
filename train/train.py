@@ -1474,6 +1474,7 @@ def train(args):
         use_ptm_on_the_fly=bool(getattr(args, "use_ptm_on_the_fly", False)),
         ptm_model_id=str(getattr(args, "ptm_model_id", "facebook/wav2vec2-base")),
         ptm_sample_rate=int(getattr(args, "audio_sample_rate", 16000)),
+        post_fusion_dropout_prob=float(getattr(args, "branch_dropout_prob", 0.3)),
     )
 
     # Stage A -> Stage B warm-start (best-effort)
@@ -1555,10 +1556,41 @@ def train(args):
         print(f"[WARN] GFLOPs profiling failed: {type(ex).__name__}: {ex}")
 
     if args.optimizer.lower() == "adam":
-        params = list(model.parameters()) + list(criterion.parameters())
-        opt = optim.AdamW(
-            params, lr=args.learning_rate, weight_decay=args.weight_decay
-        )
+        mode_int = int(getattr(args, "mode", 3))
+        base_lr = float(args.learning_rate)
+        if mode_int == 3:
+            ptm_scale = float(getattr(args, "stage2_ptm_lr_scale", 0.35))
+            wd = float(args.weight_decay)
+
+            ptm_params, hc_params, fusion_params, other_params = [], [], [], []
+            for n, p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if n.startswith("ptm_encoder.") or n.startswith("ptm_extractor.") or n.startswith("ptm_backbone."):
+                    ptm_params.append(p)
+                elif n.startswith("handcrafted_encoder.") or n.startswith("hc_backbone."):
+                    hc_params.append(p)
+                elif n.startswith("fusion.") or n.startswith("post_fusion_mlp.") or n.startswith("ptm_emb_ln.") or n.startswith("hc_emb_ln.") or n.startswith("fused_emb_ln."):
+                    fusion_params.append(p)
+                else:
+                    other_params.append(p)
+
+            param_groups = []
+            if len(ptm_params) > 0:
+                param_groups.append({"params": ptm_params, "lr": base_lr * ptm_scale, "weight_decay": wd})
+            if len(hc_params) > 0:
+                param_groups.append({"params": hc_params, "lr": base_lr, "weight_decay": wd})
+            if len(fusion_params) > 0:
+                param_groups.append({"params": fusion_params, "lr": base_lr * 1.2, "weight_decay": wd})
+            if len(other_params) > 0:
+                param_groups.append({"params": other_params, "lr": base_lr, "weight_decay": wd})
+
+            param_groups.append({"params": list(criterion.parameters()), "lr": base_lr, "weight_decay": wd})
+            opt = optim.AdamW(param_groups)
+        else:
+            params = list(model.parameters()) + list(criterion.parameters())
+            opt = optim.AdamW(params, lr=base_lr, weight_decay=args.weight_decay)
+
     elif args.optimizer.lower() == "sgd":
         params = list(model.parameters()) + list(criterion.parameters())
         opt = optim.SGD(

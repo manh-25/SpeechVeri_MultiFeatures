@@ -675,6 +675,7 @@ class SpeakerVerificationModel(nn.Module):
         use_ptm_on_the_fly=False,
         ptm_model_id="facebook/wav2vec2-base",
         ptm_sample_rate=16000,
+        post_fusion_dropout_prob=0.3
     ):
         super().__init__()
         self.mode = mode
@@ -738,6 +739,14 @@ class SpeakerVerificationModel(nn.Module):
                 )
             else:
                 raise ValueError(f"Unknown fusion method: {fusion_method}")
+            
+            self.post_fusion_dropout_prob = float(post_fusion_dropout_prob)
+            self.post_fusion_mlp = nn.Sequential(
+                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM),
+                nn.ReLU(),
+                nn.Dropout(p=self.post_fusion_dropout_prob),
+                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM),
+            )
        
 
     def forward(self, return_gates=False, **kwargs):
@@ -812,6 +821,7 @@ class SpeakerVerificationModel(nn.Module):
                 fused_emb = self.fusion(ptm_emb, hc_emb)
 
             fused_emb = self.fused_emb_ln(fused_emb)
+            fused_emb = fused_emb + self.post_fusion_mlp(fused_emb)
             speaker_embedding = fused_emb
 
         speaker_embedding = F.normalize(speaker_embedding, p=2, dim=1)
@@ -871,6 +881,7 @@ def get_model(
     use_ptm_on_the_fly=False,
     ptm_model_id="facebook/wav2vec2-base",
     ptm_sample_rate=16000,
+    post_fusion_dropout_prob=0.3
 ):
     """
     Create and initialize model.
@@ -895,6 +906,7 @@ def get_model(
         use_ptm_on_the_fly=use_ptm_on_the_fly,
         ptm_model_id=ptm_model_id,
         ptm_sample_rate=ptm_sample_rate,
+        post_fusion_dropout_prob=post_fusion_dropout_prob
     )
     model = model.to(device)
 
