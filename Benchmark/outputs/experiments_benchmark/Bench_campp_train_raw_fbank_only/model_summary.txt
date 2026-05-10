@@ -1,0 +1,29 @@
+===========================================================================
+Layer (type:depth-idx)                             Param #
+===========================================================================
+BenchmarkFeatureAdapter                            --
+├─CAMPPlus: 1-1                                    --
+│    └─FCM: 2-1                                    --
+│    │    └─Conv2d: 3-1                            288
+│    │    └─BatchNorm2d: 3-2                       64
+│    │    └─Sequential: 3-3                        38,208
+│    │    └─Sequential: 3-4                        38,208
+│    │    └─Conv2d: 3-5                            9,216
+│    │    └─BatchNorm2d: 3-6                       64
+│    └─Sequential: 2-2                             --
+│    │    └─TDNNLayer: 3-7                         205,056
+│    │    └─CAMDenseTDNNBlock: 3-8                 748,800
+│    │    └─TransitLayer: 3-9                      132,096
+│    │    └─CAMDenseTDNNBlock: 3-10                2,496,000
+│    │    └─TransitLayer: 3-11                     526,336
+│    │    └─CAMDenseTDNNBlock: 3-12                1,930,240
+│    │    └─TransitLayer: 3-13                     526,336
+│    │    └─Sequential: 3-14                       1,024
+│    │    └─StatsPool: 3-15                        --
+│    │    └─DenseLayer: 3-16                       524,288
+├─Identity: 1-2                                    --
+===========================================================================
+Total params: 7,176,224
+Trainable params: 7,176,224
+Non-trainable params: 0
+===========================================================================

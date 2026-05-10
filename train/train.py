@@ -936,6 +936,9 @@ def train_epoch(
     hard_negative_weight=HARD_NEGATIVE_WEIGHT,
     hard_negative_margin=HARD_NEGATIVE_MARGIN,
     use_mixed_precision=False,
+    amp_grad_warn_every=50,
+    amp_nonfinite_grad_fallback_ratio=0.30,
+    amp_nonfinite_grad_fallback_min_batches=300,
     non_blocking_transfer=False,
     max_steps_per_epoch=None,
 ):
@@ -962,6 +965,8 @@ def train_epoch(
     num_batches = 0
     all_logits = []
     all_labels = []
+    amp_enabled = bool(use_mixed_precision and scaler is not None)
+    nonfinite_grad_events = 0
 
     progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]", leave=False)
 
@@ -1007,7 +1012,7 @@ def train_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass with mixed precision
-        if use_mixed_precision and scaler is not None:
+        if amp_enabled and scaler is not None:
             with autocast('cuda'):
                 _, embeddings = model(**inputs)
             loss, logits = criterion(None, labels, embeddings=embeddings.float())
@@ -1039,15 +1044,40 @@ def train_epoch(
             continue
 
         # Backward pass
-        if use_mixed_precision and scaler is not None:
+        if amp_enabled and scaler is not None:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if not torch.isfinite(grad_norm):
+                nonfinite_grad_events += 1
+                warn_every = max(1, int(amp_grad_warn_every))
+                if nonfinite_grad_events <= 3 or (nonfinite_grad_events % warn_every == 0):
+                    print(
+                        f"\n[WARN] Non-finite grad norm at batch {batch_idx}. "
+                        f"Skip optimizer step. count={nonfinite_grad_events}"
+                    )
+                optimizer.zero_grad(set_to_none=True)
+                scaler.update()
+                observed_batches = batch_idx + 1
+                min_batches = max(1, int(amp_nonfinite_grad_fallback_min_batches))
+                if observed_batches >= min_batches:
+                    bad_ratio = nonfinite_grad_events / float(observed_batches)
+                    if bad_ratio >= float(amp_nonfinite_grad_fallback_ratio):
+                        amp_enabled = False
+                        print(
+                            f"\n[INFO] AMP disabled after sustained non-finite gradients "
+                            f"(ratio={bad_ratio:.3f}, observed_batches={observed_batches})."
+                        )
+                continue
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if not torch.isfinite(grad_norm):
+                print(f"\n[WARN] Non-finite grad norm at batch {batch_idx}. Skip optimizer step.")
+                optimizer.zero_grad(set_to_none=True)
+                continue
             optimizer.step()
 
         # Metrics
@@ -1070,6 +1100,9 @@ def train_epoch(
     if num_batches == 0:
         print("[WARN] No valid training batch in this epoch (all skipped). Return NaN loss.")
         return float("nan"), 0.0
+
+    if use_mixed_precision and nonfinite_grad_events > 0:
+        print(f"[INFO] Epoch {epoch + 1}: non-finite grad events handled by AMP guard = {nonfinite_grad_events}")
 
     avg_loss = total_loss / num_batches
     avg_accuracy = total_accuracy / num_batches
@@ -1268,6 +1301,11 @@ def train(args):
     
     device = torch.device(DEVICE)
     use_mixed_precision = bool(getattr(args, "mixed_precision", MIXED_PRECISION))
+    amp_scaler_init_scale = float(getattr(args, "amp_scaler_init_scale", 1024.0))
+    amp_scaler_growth_interval = max(1, int(getattr(args, "amp_scaler_growth_interval", 2000)))
+    amp_grad_warn_every = max(1, int(getattr(args, "amp_grad_warn_every", 50)))
+    amp_nonfinite_grad_fallback_ratio = float(getattr(args, "amp_nonfinite_grad_fallback_ratio", 0.30))
+    amp_nonfinite_grad_fallback_min_batches = max(1, int(getattr(args, "amp_nonfinite_grad_fallback_min_batches", 300)))
 
     # Runtime/data-loader knobs (with safe defaults).
     # On Windows + notebooks, multiprocessing DataLoader workers are less stable,
@@ -1409,6 +1447,11 @@ def train(args):
         "num_epochs": args.num_epochs,
         "weight_decay": args.weight_decay,
         "mixed_precision": use_mixed_precision,
+        "amp_scaler_init_scale": amp_scaler_init_scale,
+        "amp_scaler_growth_interval": amp_scaler_growth_interval,
+        "amp_grad_warn_every": amp_grad_warn_every,
+        "amp_nonfinite_grad_fallback_ratio": amp_nonfinite_grad_fallback_ratio,
+        "amp_nonfinite_grad_fallback_min_batches": amp_nonfinite_grad_fallback_min_batches,
         "num_workers": num_workers,
         "pin_memory": pin_memory,
         "persistent_workers": persistent_workers,
@@ -1617,7 +1660,15 @@ def train(args):
         raise ValueError(f"Unknown scheduler: {args.lr_scheduler}")
 
     # Mixed precision
-    scaler = GradScaler('cuda') if (use_mixed_precision and str(device).startswith("cuda")) else None
+    scaler = (
+        GradScaler(
+            'cuda',
+            init_scale=amp_scaler_init_scale,
+            growth_interval=amp_scaler_growth_interval,
+        )
+        if (use_mixed_precision and str(device).startswith("cuda"))
+        else None
+    )
 
     # Early stopping
     early_stopping = EarlyStopping(patience=args.early_stop_patience, delta=EARLY_STOP_DELTA)
@@ -1675,6 +1726,9 @@ def train(args):
             hard_negative_weight=HARD_NEGATIVE_WEIGHT,
             hard_negative_margin=HARD_NEGATIVE_MARGIN,
             use_mixed_precision=use_mixed_precision,
+            amp_grad_warn_every=amp_grad_warn_every,
+            amp_nonfinite_grad_fallback_ratio=amp_nonfinite_grad_fallback_ratio,
+            amp_nonfinite_grad_fallback_min_batches=amp_nonfinite_grad_fallback_min_batches,
             non_blocking_transfer=non_blocking_transfer,
             max_steps_per_epoch=max_train_steps_per_epoch,
         )

@@ -6,10 +6,19 @@ from collections import defaultdict
 import csv
 import json
 import os
+import re
 import time
 from datetime import datetime
+from pathlib import Path
 from metrics import compute_eer, compute_mindcf
 from tqdm import tqdm
+
+from config import (
+    INFERENCE_TEST_CELEB_E_DIR,
+    INFERENCE_TEST_CELEB_H_DIR,
+    INFERENCE_TEST_CELEB_E_TRIAL_FILE,
+    INFERENCE_TEST_CELEB_H_TRIAL_FILE,
+)
 
 
 def _count_params_and_memory(model):
@@ -301,6 +310,82 @@ def _write_rows_csv(csv_path, rows):
             writer.writerow(row)
 
 
+_DEFAULT_TRIAL_PATTERNS = ("list_gt*.txt", "*list*gt*.txt", "*.txt")
+
+
+def _safe_path_str(path_value):
+    if path_value is None:
+        return None
+    text = str(path_value).strip()
+    return text if text else None
+
+
+def _resolve_trial_in_test_dir(test_dir, preferred_file=None):
+    if test_dir is None:
+        return None
+    test_dir = Path(test_dir)
+    if not test_dir.exists() or not test_dir.is_dir():
+        return None
+
+    preferred_file = _safe_path_str(preferred_file)
+    if preferred_file is not None:
+        preferred_path = test_dir / preferred_file
+        if preferred_path.exists() and preferred_path.is_file():
+            return str(preferred_path)
+
+    for pattern in _DEFAULT_TRIAL_PATTERNS:
+        for path in sorted(test_dir.glob(pattern)):
+            if path.is_file():
+                return str(path)
+    return None
+
+
+def _resolve_trials_path_for_test(test_name, test_tag, trials_by_test):
+    raw = None
+    if isinstance(trials_by_test, dict):
+        raw = trials_by_test.get(test_name)
+        if raw is None:
+            raw = trials_by_test.get(test_tag)
+
+    if isinstance(raw, (str, Path)):
+        raw_text = _safe_path_str(raw)
+        if raw_text is not None:
+            p = Path(raw_text)
+            if p.exists() and p.is_file():
+                return str(p)
+            if p.exists() and p.is_dir():
+                auto = _resolve_trial_in_test_dir(p)
+                if auto is not None:
+                    return auto
+
+    if isinstance(raw, dict):
+        trial_path = _safe_path_str(raw.get("trial_path"))
+        if trial_path is not None:
+            p = Path(trial_path)
+            if p.exists() and p.is_file():
+                return str(p)
+
+        test_dir = _safe_path_str(raw.get("test_dir"))
+        trial_file = _safe_path_str(raw.get("trial_file"))
+        trial_in_test_dir = bool(raw.get("trial_in_test_dir", True))
+        if trial_in_test_dir and test_dir is not None:
+            auto = _resolve_trial_in_test_dir(test_dir, preferred_file=trial_file)
+            if auto is not None:
+                return auto
+
+    celeb_defaults = {
+        "test_celeb_e": (INFERENCE_TEST_CELEB_E_DIR, INFERENCE_TEST_CELEB_E_TRIAL_FILE),
+        "test_celeb_h": (INFERENCE_TEST_CELEB_H_DIR, INFERENCE_TEST_CELEB_H_TRIAL_FILE),
+    }
+    default_entry = celeb_defaults.get(str(test_name)) or celeb_defaults.get(str(test_tag))
+    if default_entry is not None:
+        auto = _resolve_trial_in_test_dir(default_entry[0], preferred_file=default_entry[1])
+        if auto is not None:
+            return auto
+
+    return None
+
+
 def run_inference_benchmark_reports(
     model,
     test_loaders,
@@ -334,11 +419,15 @@ def run_inference_benchmark_reports(
 
     for test_name, loader in test_loaders.items():
         test_tag = _safe_test_tag(test_name)
-        trials_path = None
-        if isinstance(trials_by_test, dict):
-            trials_path = trials_by_test.get(test_name)
-            if trials_path is None:
-                trials_path = trials_by_test.get(test_tag)
+        trials_path = _resolve_trials_path_for_test(
+            test_name=test_name,
+            test_tag=test_tag,
+            trials_by_test=trials_by_test,
+        )
+        if trials_path is not None:
+            print(f"[TEST SET] {test_name} | trial={trials_path}")
+        else:
+            print(f"[TEST SET] {test_name} | trial=auto-balanced-pairs")
 
         eval_results = evaluate_speaker_verification(
             model=model,
@@ -393,12 +482,32 @@ def _load_trials_file(trials_path, max_trials=None):
             line = line.strip()
             if not line:
                 continue
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            label = int(parts[0])
-            path1 = parts[1]
-            path2 = parts[2]
+
+            label = None
+            path1 = None
+            path2 = None
+
+            # CSV-like: 0,path1,path2
+            if "," in line:
+                csv_line = line.strip('"')
+                pieces = [x.strip() for x in csv_line.split(",") if str(x).strip() != ""]
+                if len(pieces) >= 3:
+                    try:
+                        label = int(pieces[0])
+                        path1 = pieces[1]
+                        path2 = pieces[2]
+                    except Exception:
+                        label = None
+
+            # TXT-like: 0 path1 path2 (path can contain spaces -> lazy regex split)
+            if label is None:
+                m = re.match(r"^\s*([01])\s+(.+?)\s+(.+?)\s*$", line)
+                if m is None:
+                    continue
+                label = int(m.group(1))
+                path1 = m.group(2)
+                path2 = m.group(3)
+
             trials.append((label, path1, path2))
             if max_trials is not None and len(trials) >= max_trials:
                 break

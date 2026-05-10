@@ -1,0 +1,40 @@
+================================================================================
+Layer (type:depth-idx)                                  Param #
+================================================================================
+BenchmarkFeatureAdapter                                 --
+├─ERes2NetV2: 1-1                                       --
+│    └─Conv2d: 2-1                                      576
+│    └─BatchNorm2d: 2-2                                 128
+│    └─Sequential: 2-3                                  --
+│    │    └─BasicBlockERes2NetV2: 3-1                   31,064
+│    │    └─BasicBlockERes2NetV2: 3-2                   25,944
+│    │    └─BasicBlockERes2NetV2: 3-3                   25,944
+│    └─Sequential: 2-4                                  --
+│    │    └─BasicBlockERes2NetV2: 3-4                   122,816
+│    │    └─BasicBlockERes2NetV2: 3-5                   102,848
+│    │    └─BasicBlockERes2NetV2: 3-6                   102,848
+│    │    └─BasicBlockERes2NetV2: 3-7                   102,848
+│    └─Sequential: 2-5                                  --
+│    │    └─BasicBlockERes2NetV2AFF: 3-8                496,886
+│    │    └─BasicBlockERes2NetV2AFF: 3-9                418,038
+│    │    └─BasicBlockERes2NetV2AFF: 3-10               418,038
+│    │    └─BasicBlockERes2NetV2AFF: 3-11               418,038
+│    │    └─BasicBlockERes2NetV2AFF: 3-12               418,038
+│    │    └─BasicBlockERes2NetV2AFF: 3-13               418,038
+│    └─Sequential: 2-6                                  --
+│    │    └─BasicBlockERes2NetV2AFF: 3-14               1,981,004
+│    │    └─BasicBlockERes2NetV2AFF: 3-15               1,667,660
+│    │    └─BasicBlockERes2NetV2AFF: 3-16               1,667,660
+│    └─Conv2d: 2-7                                      4,718,592
+│    └─AFF: 2-8                                         --
+│    │    └─Sequential: 3-17                            790,272
+│    └─TSTP: 2-9                                        --
+│    └─Linear: 2-10                                     3,932,352
+│    └─Identity: 2-11                                   --
+│    └─Identity: 2-12                                   --
+├─Identity: 1-2                                         --
+================================================================================
+Total params: 17,859,632
+Trainable params: 17,859,632
+Non-trainable params: 0
+================================================================================

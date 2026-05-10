@@ -1,0 +1,68 @@
+Training started: 2026-05-02 12:07:08.126858
+{
+  "exp_name": "Mode1_PTM_train_raw_wav2vec2_bdrop0p3_aug_aam_B_augOn_ap0p2_fn0p005_en0p002_m0p25_s30",
+  "timestamp": "2026-05-02T12:07:03.655429",
+  "device": "cuda",
+  "duration": "train_raw",
+  "pretrained_model": "wav2vec2",
+  "mode": 1,
+  "fusion_method": "N/A",
+  "feature_mode": "N/A",
+  "use_gating": false,
+  "use_augment": true,
+  "use_speaker_balanced_sampler": false,
+  "speakers_per_batch": 16,
+  "utt_per_speaker": 3,
+  "hard_negative_mining": false,
+  "hard_negative_topk": 8,
+  "hard_negative_weight": 0.03,
+  "hard_negative_margin": 0.06,
+  "augment_prob": 0.2,
+  "feature_noise_std": 0.005,
+  "embedding_noise_std": 0.002,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 60,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "num_workers": 0,
+  "pin_memory": true,
+  "persistent_workers": false,
+  "prefetch_factor": null,
+  "non_blocking_transfer": true,
+  "cudnn_benchmark": false,
+  "preload_all_ram": null,
+  "preload_ptm_ram": null,
+  "preload_hc_ram": null,
+  "validate_every": 1,
+  "max_train_steps_per_epoch": 0,
+  "train_subset_fraction": 1.0,
+  "max_train_samples": 0,
+  "val_max_pos_pairs": 10000,
+  "early_stop_patience": 7,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.25,
+  "aam_scale": 30.0
+}
+
+Epoch   1 | Train Loss: 7.7491, Acc: 0.2602 | EER: 13.57%, MinDCF: 0.7074 | LR: 0.000100 | TrainTime: 30.10s, ValTime: 1.99s, EpochTime: 32.08s
+Epoch   2 | Train Loss: 4.2050, Acc: 0.4753 | EER: 11.82%, MinDCF: 0.6082 | LR: 0.000100 | TrainTime: 5.98s, ValTime: 0.21s, EpochTime: 6.19s
+Epoch   3 | Train Loss: 3.1059, Acc: 0.5730 | EER: 11.10%, MinDCF: 0.5648 | LR: 0.000100 | TrainTime: 5.08s, ValTime: 0.20s, EpochTime: 5.28s
+Epoch   4 | Train Loss: 2.5562, Acc: 0.6256 | EER: 11.06%, MinDCF: 0.5488 | LR: 0.000100 | TrainTime: 5.74s, ValTime: 0.20s, EpochTime: 5.94s
+Epoch   5 | Train Loss: 2.2210, Acc: 0.6597 | EER: 10.37%, MinDCF: 0.5368 | LR: 0.000100 | TrainTime: 5.28s, ValTime: 0.20s, EpochTime: 5.47s
+Epoch   6 | Train Loss: 1.9955, Acc: 0.6849 | EER: 9.77%, MinDCF: 0.5288 | LR: 0.000100 | TrainTime: 6.22s, ValTime: 0.20s, EpochTime: 6.43s
+Epoch   7 | Train Loss: 1.8357, Acc: 0.7034 | EER: 10.14%, MinDCF: 0.5212 | LR: 0.000100 | TrainTime: 5.03s, ValTime: 0.20s, EpochTime: 5.23s
+Epoch   8 | Train Loss: 1.7112, Acc: 0.7186 | EER: 10.02%, MinDCF: 0.5271 | LR: 0.000100 | TrainTime: 5.05s, ValTime: 0.20s, EpochTime: 5.24s
+Epoch   9 | Train Loss: 1.6139, Acc: 0.7313 | EER: 9.71%, MinDCF: 0.5117 | LR: 0.000100 | TrainTime: 5.02s, ValTime: 0.21s, EpochTime: 5.22s
+Epoch  10 | Train Loss: 1.5383, Acc: 0.7413 | EER: 9.95%, MinDCF: 0.5160 | LR: 0.000100 | TrainTime: 6.15s, ValTime: 0.20s, EpochTime: 6.35s
+Epoch  11 | Train Loss: 1.4704, Acc: 0.7511 | EER: 10.03%, MinDCF: 0.5108 | LR: 0.000100 | TrainTime: 5.17s, ValTime: 0.20s, EpochTime: 5.37s
+Epoch  12 | Train Loss: 1.4132, Acc: 0.7589 | EER: 9.46%, MinDCF: 0.4898 | LR: 0.000100 | TrainTime: 5.74s, ValTime: 0.20s, EpochTime: 5.94s
+Epoch  13 | Train Loss: 1.3619, Acc: 0.7670 | EER: 9.67%, MinDCF: 0.5041 | LR: 0.000100 | TrainTime: 5.15s, ValTime: 0.21s, EpochTime: 5.36s
+Epoch  14 | Train Loss: 1.3176, Acc: 0.7736 | EER: 10.09%, MinDCF: 0.5065 | LR: 0.000100 | TrainTime: 5.91s, ValTime: 0.20s, EpochTime: 6.11s
+Epoch  15 | Train Loss: 1.2792, Acc: 0.7794 | EER: 10.07%, MinDCF: 0.5138 | LR: 0.000100 | TrainTime: 5.05s, ValTime: 0.20s, EpochTime: 5.25s
+Epoch  16 | Train Loss: 1.2418, Acc: 0.7849 | EER: 10.06%, MinDCF: 0.5062 | LR: 0.000050 | TrainTime: 5.67s, ValTime: 0.20s, EpochTime: 5.87s
+Epoch  17 | Train Loss: 1.1579, Acc: 0.7992 | EER: 10.27%, MinDCF: 0.5092 | LR: 0.000050 | TrainTime: 5.55s, ValTime: 0.21s, EpochTime: 5.76s
+Epoch  18 | Train Loss: 1.1377, Acc: 0.8025 | EER: 10.26%, MinDCF: 0.5087 | LR: 0.000050 | TrainTime: 5.95s, ValTime: 0.20s, EpochTime: 6.15s
+Epoch  19 | Train Loss: 1.1206, Acc: 0.8048 | EER: 9.98%, MinDCF: 0.5061 | LR: 0.000050 | TrainTime: 5.02s, ValTime: 0.20s, EpochTime: 5.22s
+Early stopping triggered!

@@ -1,0 +1,22 @@
+[
+  {
+    "arch": "campp",
+    "exp_name": "Bench_campp_train_raw_fbank_only",
+    "status": "skipped_existing"
+  },
+  {
+    "arch": "eres2netv2",
+    "exp_name": "Bench_eres2netv2_train_raw_fbank_only",
+    "status": "skipped_existing"
+  },
+  {
+    "arch": "mfa_conformer",
+    "exp_name": "Bench_mfa_conformer_train_raw_fbank_only",
+    "status": "skipped_existing"
+  },
+  {
+    "arch": "redimnet",
+    "exp_name": "Bench_redimnet_train_raw_fbank_only",
+    "status": "done"
+  }
+]

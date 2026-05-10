@@ -1,0 +1,49 @@
+===========================================================================
+Layer (type:depth-idx)                             Param #
+===========================================================================
+SpeakerVerificationModel                           --
+├─HandcraftedEncoder: 1-1                          --
+│    └─ModalityProjector: 2-1                      --
+│    │    └─Sequential: 3-1                        893,184
+├─ECAPATDNN: 1-2                                   --
+│    └─Conv1d: 2-2                                 1,966,592
+│    └─BatchNorm1d: 2-3                            1,024
+│    └─ReLU: 2-4                                   --
+│    └─Bottle2neck: 2-5                            --
+│    │    └─Conv1d: 3-2                            262,656
+│    │    └─BatchNorm1d: 3-3                       1,024
+│    │    └─ModuleList: 3-4                        86,464
+│    │    └─ModuleList: 3-5                        896
+│    │    └─Conv1d: 3-6                            262,656
+│    │    └─BatchNorm1d: 3-7                       1,024
+│    │    └─ReLU: 3-8                              --
+│    │    └─SEModule: 3-9                          131,712
+│    └─Bottle2neck: 2-6                            --
+│    │    └─Conv1d: 3-10                           262,656
+│    │    └─BatchNorm1d: 3-11                      1,024
+│    │    └─ModuleList: 3-12                       86,464
+│    │    └─ModuleList: 3-13                       896
+│    │    └─Conv1d: 3-14                           262,656
+│    │    └─BatchNorm1d: 3-15                      1,024
+│    │    └─ReLU: 3-16                             --
+│    │    └─SEModule: 3-17                         131,712
+│    └─Bottle2neck: 2-7                            --
+│    │    └─Conv1d: 3-18                           262,656
+│    │    └─BatchNorm1d: 3-19                      1,024
+│    │    └─ModuleList: 3-20                       86,464
+│    │    └─ModuleList: 3-21                       896
+│    │    └─Conv1d: 3-22                           262,656
+│    │    └─BatchNorm1d: 3-23                      1,024
+│    │    └─ReLU: 3-24                             --
+│    │    └─SEModule: 3-25                         131,712
+│    └─Conv1d: 2-8                                 2,360,832
+│    └─AttentiveStatisticsPooling: 2-9             --
+│    │    └─Sequential: 3-26                       1,575,168
+│    └─BatchNorm1d: 2-10                           6,144
+│    └─Linear: 2-11                                1,573,376
+│    └─BatchNorm1d: 2-12                           1,024
+===========================================================================
+Total params: 10,616,640
+Trainable params: 10,616,640
+Non-trainable params: 0
+===========================================================================

@@ -1,0 +1,58 @@
+Training started: 2026-05-02 14:18:22.178039
+{
+  "exp_name": "Mode1_PTM_train_vi_full_wav2vec2_bdrop0p3_aug_aam_B_augOn_ap0p2_fn0p005_en0p002_m0p25_s30",
+  "timestamp": "2026-05-02T14:18:18.316560",
+  "device": "cuda",
+  "duration": "train_vi_full",
+  "pretrained_model": "wav2vec2",
+  "mode": 1,
+  "fusion_method": "N/A",
+  "feature_mode": "N/A",
+  "use_gating": false,
+  "use_augment": true,
+  "use_speaker_balanced_sampler": false,
+  "speakers_per_batch": 16,
+  "utt_per_speaker": 3,
+  "hard_negative_mining": false,
+  "hard_negative_topk": 8,
+  "hard_negative_weight": 0.03,
+  "hard_negative_margin": 0.06,
+  "augment_prob": 0.2,
+  "feature_noise_std": 0.005,
+  "embedding_noise_std": 0.002,
+  "learning_rate": 0.0001,
+  "optimizer": "adam",
+  "batch_size": 256,
+  "num_epochs": 60,
+  "weight_decay": 0.001,
+  "mixed_precision": true,
+  "num_workers": 0,
+  "pin_memory": true,
+  "persistent_workers": false,
+  "prefetch_factor": null,
+  "non_blocking_transfer": true,
+  "cudnn_benchmark": false,
+  "preload_all_ram": null,
+  "preload_ptm_ram": null,
+  "preload_hc_ram": null,
+  "validate_every": 1,
+  "max_train_steps_per_epoch": 0,
+  "train_subset_fraction": 1.0,
+  "max_train_samples": 0,
+  "val_max_pos_pairs": 10000,
+  "early_stop_patience": 7,
+  "lr_scheduler": "plateau",
+  "aam_margin": 0.25,
+  "aam_scale": 30.0
+}
+
+Epoch   1 | Train Loss: 8.1229, Acc: 0.2518 | EER: 18.11%, MinDCF: 0.8486 | LR: 0.000100 | TrainTime: 39.13s, ValTime: 4.49s, EpochTime: 43.62s
+Epoch   2 | Train Loss: 4.4718, Acc: 0.4580 | EER: 15.78%, MinDCF: 0.7684 | LR: 0.000100 | TrainTime: 4.96s, ValTime: 0.26s, EpochTime: 5.23s
+Epoch   3 | Train Loss: 3.2776, Acc: 0.5607 | EER: 15.91%, MinDCF: 0.7419 | LR: 0.000100 | TrainTime: 5.24s, ValTime: 0.27s, EpochTime: 5.51s
+Epoch   4 | Train Loss: 2.6695, Acc: 0.6165 | EER: 16.56%, MinDCF: 0.7304 | LR: 0.000100 | TrainTime: 4.77s, ValTime: 0.27s, EpochTime: 5.03s
+Epoch   5 | Train Loss: 2.2984, Acc: 0.6523 | EER: 17.15%, MinDCF: 0.7198 | LR: 0.000100 | TrainTime: 4.56s, ValTime: 0.27s, EpochTime: 4.83s
+Epoch   6 | Train Loss: 2.0454, Acc: 0.6794 | EER: 16.83%, MinDCF: 0.7196 | LR: 0.000050 | TrainTime: 4.58s, ValTime: 0.27s, EpochTime: 4.84s
+Epoch   7 | Train Loss: 1.8417, Acc: 0.7027 | EER: 17.22%, MinDCF: 0.7207 | LR: 0.000050 | TrainTime: 4.50s, ValTime: 0.27s, EpochTime: 4.77s
+Epoch   8 | Train Loss: 1.7604, Acc: 0.7129 | EER: 16.60%, MinDCF: 0.7144 | LR: 0.000050 | TrainTime: 5.38s, ValTime: 0.27s, EpochTime: 5.65s
+Epoch   9 | Train Loss: 1.6920, Acc: 0.7206 | EER: 16.65%, MinDCF: 0.7142 | LR: 0.000050 | TrainTime: 4.38s, ValTime: 0.27s, EpochTime: 4.65s
+Early stopping triggered!

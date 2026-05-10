@@ -5,3 +5,4 @@
 *.venv
 *.pth
 .streamlit
+*tensorboard_logs

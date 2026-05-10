@@ -201,7 +201,7 @@ class ERes2NetV2(nn.Module):
         self.fuse34 = AFF(channels=m_channels * 8 * self.expansion, r=4)
 
         self.n_stats = 1 if pooling_func == 'TAP' or pooling_func == "TSDP" else 2
-        self.pool = getattr(pooling.pooling_layers, pooling_func)(
+        self.pool = pooling.pooling_layers[pooling_func](
             in_dim=self.stats_dim * self.expansion)
         self.seg_1 = nn.Linear(self.stats_dim * self.expansion * self.n_stats,
                                embedding_size)

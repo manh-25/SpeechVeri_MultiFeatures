@@ -133,3 +133,9 @@ EMBEDDING_NOISE_STD = 0.0006
 CONFIDENCE_THRESHOLD = 0.5
 SAVE_SALIENCY_MAP = True
 SALIENCY_OUTPUT_DIR = "./saliency_maps"
+
+# Optional fixed-trial test directories (txt list_gt-style) for benchmark-like reports.
+INFERENCE_TEST_CELEB_E_DIR = "D:/test_celeb_e"
+INFERENCE_TEST_CELEB_H_DIR = "D:/test_celeb_h"
+INFERENCE_TEST_CELEB_E_TRIAL_FILE = "D:/test_celeb_e/list_gt.txt"
+INFERENCE_TEST_CELEB_H_TRIAL_FILE = "D:/test_celeb_h/list_gt.txt"

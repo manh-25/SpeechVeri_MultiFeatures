@@ -1,0 +1,70 @@
+===========================================================================
+Layer (type:depth-idx)                             Param #
+===========================================================================
+SpeakerVerificationModel                           --
+├─PTMEmbeddingHead: 1-1                            --
+│    └─LayerAttentionPooling: 2-1                  --
+│    │    └─Linear: 3-1                            769
+│    └─LayerNorm: 2-2                              1,536
+│    └─Sequential: 2-3                             --
+│    │    └─Linear: 3-2                            393,728
+│    │    └─ReLU: 3-3                              --
+│    │    └─LayerNorm: 3-4                         1,024
+├─HandcraftedEncoder: 1-2                          --
+│    └─ModalityProjector: 2-4                      --
+│    │    └─Sequential: 3-5                        840,704
+├─ECAPATDNN: 1-3                                   --
+│    └─Conv1d: 2-5                                 1,966,592
+│    └─BatchNorm1d: 2-6                            1,024
+│    └─ReLU: 2-7                                   --
+│    └─Bottle2neck: 2-8                            --
+│    │    └─Conv1d: 3-6                            262,656
+│    │    └─BatchNorm1d: 3-7                       1,024
+│    │    └─ModuleList: 3-8                        86,464
+│    │    └─ModuleList: 3-9                        896
+│    │    └─Conv1d: 3-10                           262,656
+│    │    └─BatchNorm1d: 3-11                      1,024
+│    │    └─ReLU: 3-12                             --
+│    │    └─SEModule: 3-13                         131,712
+│    └─Bottle2neck: 2-9                            --
+│    │    └─Conv1d: 3-14                           262,656
+│    │    └─BatchNorm1d: 3-15                      1,024
+│    │    └─ModuleList: 3-16                       86,464
+│    │    └─ModuleList: 3-17                       896
+│    │    └─Conv1d: 3-18                           262,656
+│    │    └─BatchNorm1d: 3-19                      1,024
+│    │    └─ReLU: 3-20                             --
+│    │    └─SEModule: 3-21                         131,712
+│    └─Bottle2neck: 2-10                           --
+│    │    └─Conv1d: 3-22                           262,656
+│    │    └─BatchNorm1d: 3-23                      1,024
+│    │    └─ModuleList: 3-24                       86,464
+│    │    └─ModuleList: 3-25                       896
+│    │    └─Conv1d: 3-26                           262,656
+│    │    └─BatchNorm1d: 3-27                      1,024
+│    │    └─ReLU: 3-28                             --
+│    │    └─SEModule: 3-29                         131,712
+│    └─Conv1d: 2-11                                2,360,832
+│    └─AttentiveStatisticsPooling: 2-12            --
+│    │    └─Sequential: 3-30                       1,575,168
+│    └─BatchNorm1d: 2-13                           6,144
+│    └─Linear: 2-14                                1,573,376
+│    └─BatchNorm1d: 2-15                           1,024
+├─LayerNorm: 1-4                                   1,024
+├─LayerNorm: 1-5                                   1,024
+├─LayerNorm: 1-6                                   1,024
+├─EmbeddingConcatFusion: 1-7                       --
+│    └─Sequential: 2-16                            --
+│    │    └─Linear: 3-31                           524,800
+│    │    └─ReLU: 3-32                             --
+│    │    └─Linear: 3-33                           262,656
+├─Sequential: 1-8                                  --
+│    └─Linear: 2-17                                262,656
+│    └─ReLU: 2-18                                  --
+│    └─Dropout: 2-19                               --
+│    └─Linear: 2-20                                262,656
+===========================================================================
+Total params: 12,277,057
+Trainable params: 12,277,057
+Non-trainable params: 0
+===========================================================================

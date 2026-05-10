@@ -1,0 +1,5 @@
+Experiment,Arch,Duration,Feature,EER (%),MinDCF,Used Pairs,Missing Pairs,Missing Paths,Runtime Total (s),Total Params,Trainable Params,TestSet
+Bench_redimnet_train_raw_fbank_only,redimnet,train_raw,fbank_only,4.003539138367667,0.2557474775049781,9895,0,0,159.48013899999205,3043581,3043580,test_vi
+Bench_mfa_conformer_train_raw_fbank_only,mfa_conformer,train_raw,fbank_only,4.131986853750775,0.3053391571818927,9895,0,0,106.30075659998693,17882944,17882944,test_vi
+Bench_eres2netv2_train_raw_fbank_only,eres2netv2,train_raw,fbank_only,4.456614600433124,0.23923497444108136,9895,0,0,121.83151310001267,17859632,17859632,test_vi
+Bench_campp_train_raw_fbank_only,campp,train_raw,fbank_only,4.943556220456643,0.2816450308541246,9895,0,0,317.0318996999995,7176224,7176224,test_vi
