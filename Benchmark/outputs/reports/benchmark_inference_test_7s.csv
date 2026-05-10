@@ -1,5 +1,5 @@
-Experiment,Arch,Duration,Feature,EER (%),MinDCF,Used Pairs,Missing Pairs,Missing Paths,Runtime Total (s),Total Params,Trainable Params,TestSet
-Bench_redimnet_train_raw_fbank_only,redimnet,train_raw,fbank_only,3.1986820820390323,0.5558375860182844,9895,0,0,31.302930799953174,3043581,3043580,test_7s
-Bench_campp_train_raw_fbank_only,campp,train_raw,fbank_only,3.3948621133382666,0.5673644835028104,9895,0,0,55.84673659998225,7176224,7176224,test_7s
-Bench_eres2netv2_train_raw_fbank_only,eres2netv2,train_raw,fbank_only,3.4421528920507884,0.5824731642050655,9895,0,0,20.359308300015982,17859632,17859632,test_7s
-Bench_mfa_conformer_train_raw_fbank_only,mfa_conformer,train_raw,fbank_only,3.6856237020625517,0.6504983410220305,9895,0,0,32.36566919996403,17882944,17882944,test_7s
+Experiment,Arch,Duration,Feature,EER (%),MinDCF,Used Pairs,Missing Pairs,Missing Paths,Runtime Total (s),Total Params,Trainable Params,TestSet,Param Memory (MB),Trainable Param Memory (MB)
+Bench_redimnet_train_raw_fbank_only,redimnet,train_raw,fbank_only,3.1986820820390323,0.5558375860182844,9895,0,0,31.30293079995317,3043581,3043580,test_7s,11.610340118408203,11.610336303710938
+Bench_campp_train_raw_fbank_only,campp,train_raw,fbank_only,3.3948621133382666,0.5673644835028104,9895,0,0,55.84673659998225,7176224,7176224,test_7s,27.3751220703125,27.3751220703125
+Bench_eres2netv2_train_raw_fbank_only,eres2netv2,train_raw,fbank_only,3.4421528920507884,0.5824731642050655,9895,0,0,20.359308300015982,17859632,17859632,test_7s,68.12908935546875,68.12908935546875
+Bench_mfa_conformer_train_raw_fbank_only,mfa_conformer,train_raw,fbank_only,3.685623702062552,0.6504983410220305,9895,0,0,32.36566919996403,17882944,17882944,test_7s,68.218017578125,68.218017578125
