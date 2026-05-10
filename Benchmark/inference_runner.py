@@ -69,6 +69,60 @@ def _get_feature_from_lookup(lookup, path_text):
     return None
 
 
+def _count_params_and_memory(model):
+    total_params = int(sum(p.numel() for p in model.parameters()))
+    trainable_params = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    total_param_bytes = int(sum(p.numel() * p.element_size() for p in model.parameters()))
+    trainable_param_bytes = int(sum(p.numel() * p.element_size() for p in model.parameters() if p.requires_grad))
+    return {
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "total_param_memory_mb": float(total_param_bytes / (1024 ** 2)),
+        "trainable_param_memory_mb": float(trainable_param_bytes / (1024 ** 2)),
+    }
+
+
+def _profile_gflops_per_sample(model, device, sample_inputs):
+    if sample_inputs is None:
+        return 0.0
+
+    try:
+        from torch.profiler import profile, ProfilerActivity
+    except Exception:
+        return 0.0
+
+    batch_size = 0
+    for _, value in sample_inputs.items():
+        if isinstance(value, torch.Tensor):
+            batch_size = int(value.shape[0])
+            break
+    if batch_size <= 0:
+        return 0.0
+
+    activities = [ProfilerActivity.CPU]
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        activities.append(ProfilerActivity.CUDA)
+
+    model_was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            with profile(activities=activities, with_flops=True, record_shapes=False) as prof:
+                _ = model(**sample_inputs)
+
+        total_flops = 0.0
+        for evt in prof.key_averages():
+            evt_flops = getattr(evt, "flops", 0) or 0
+            total_flops += float(evt_flops)
+
+        return float(max(0.0, (total_flops / 1e9) / float(batch_size)))
+    except Exception:
+        return 0.0
+    finally:
+        if model_was_training:
+            model.train()
+
+
 def parse_trial_file(trial_path: Path) -> pd.DataFrame:
     suffix = str(trial_path.suffix).lower()
 
@@ -230,9 +284,15 @@ def _score_one_experiment(exp_info, trials_df, feature_dir: Path, device: str, p
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval()
 
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats(device)
+
+    model_stats = _count_params_and_memory(model)
+
     unique_paths = sorted(set(trials_df["path1"].astype(str).tolist() + trials_df["path2"].astype(str).tolist()))
     path_to_emb = {}
     missing_paths = 0
+    sample_inputs_for_profile = None
 
     with torch.no_grad():
         for p in unique_paths:
@@ -241,6 +301,8 @@ def _score_one_experiment(exp_info, trials_df, feature_dir: Path, device: str, p
                 missing_paths += 1
                 continue
             inputs = {"feature": feat.unsqueeze(0).to(device).float()}
+            if sample_inputs_for_profile is None:
+                sample_inputs_for_profile = {"feature": inputs["feature"]}
             _, emb = model(**inputs)
             path_to_emb[p] = F.normalize(emb, p=2, dim=1).squeeze(0).detach().cpu().numpy().astype(np.float32)
 
@@ -284,8 +346,19 @@ def _score_one_experiment(exp_info, trials_df, feature_dir: Path, device: str, p
     mindcf = mindcf_out[0] if isinstance(mindcf_out, tuple) else mindcf_out
 
     runtime_total = float(time.perf_counter() - t0)
-    total_params = int(sum(p.numel() for p in model.parameters()))
-    trainable_params = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    gflops_per_sample = _profile_gflops_per_sample(
+        model=model,
+        device=device,
+        sample_inputs=sample_inputs_for_profile,
+    )
+    total_samples_accounted = int(len(path_to_emb))
+    gflops_total = float(gflops_per_sample * total_samples_accounted)
+
+    peak_gpu_memory_allocated_mb = 0.0
+    peak_gpu_memory_reserved_mb = 0.0
+    if torch.cuda.is_available() and str(device).startswith("cuda"):
+        peak_gpu_memory_allocated_mb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+        peak_gpu_memory_reserved_mb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
 
     del model
     del ckpt
@@ -303,8 +376,15 @@ def _score_one_experiment(exp_info, trials_df, feature_dir: Path, device: str, p
         "Missing Pairs": int(missing_pairs),
         "Missing Paths": int(missing_paths),
         "Runtime Total (s)": runtime_total,
-        "Total Params": total_params,
-        "Trainable Params": trainable_params,
+        "GFLOPs/sample": float(gflops_per_sample),
+        "GFLOPs total": float(gflops_total),
+        "Total Samples Accounted": total_samples_accounted,
+        "Peak GPU Memory Allocated (MB)": float(peak_gpu_memory_allocated_mb),
+        "Peak GPU Memory Reserved (MB)": float(peak_gpu_memory_reserved_mb),
+        "Total Params": model_stats["total_params"],
+        "Trainable Params": model_stats["trainable_params"],
+        "Param Memory (MB)": model_stats["total_param_memory_mb"],
+        "Trainable Param Memory (MB)": model_stats["trainable_param_memory_mb"],
     }
 
 
